@@ -1187,6 +1187,11 @@ pub fn addDvuiModule(
         const freetype_enabled = opts.freetype orelse false;
         if (freetype_enabled) {
             translate_c.defineCMacro("DVUI_USE_FREETYPE", "1");
+            if (b.systemIntegrationOption("freetype", .{})) {
+                translate_c.addSystemIncludePath(.{ .cwd_relative = "/usr/include/freetype2" });
+            } else if (b.lazyDependency("freetype", .{ .target = target, .optimize = optimize })) |fd| {
+                translate_c.addIncludePath(fd.artifact("freetype").getEmittedIncludeTree());
+            }
         }
         if (!libc) {
             translate_c.defineCMacro("DVUI_NO_LIBC", "1");
