@@ -1,12 +1,8 @@
 //! Adds accessibility support to widgets via the AccessKit library
 const builtin = @import("builtin");
-pub const c = @cImport({
-    if (dvui.accesskit_enabled) {
-        // Workaround for a linker symbol clash on aarch64-windows
-        @cDefine("__mingw_current_teb", "___mingw_current_teb");
-        @cInclude("accesskit.h");
-    }
-});
+// AccessKit symbols are only resolved when dvui.accesskit_enabled is true
+// (Zig lazily evaluates top-level decls, so unused c.ACCESSKIT_* won't error).
+pub const c = @import("c");
 
 pub const AccessKit = @This();
 const std = @import("std");

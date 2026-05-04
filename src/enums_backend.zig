@@ -15,6 +15,7 @@ pub const Backend = enum {
     glfw,
     web,
     wio,
+    wgpu_glfw,
     /// Does no rendering!
     testing,
 };
@@ -22,4 +23,5 @@ pub const Backend = enum {
 pub const RenderBackend = enum {
     default,
     opengl,
+    wgpu,
 };

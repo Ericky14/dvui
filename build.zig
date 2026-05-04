@@ -866,6 +866,22 @@ pub fn buildBackend(backend: Backend, test_dvui_and_app: bool, dvui_opts_in: Dvu
             };
             _ = addExample("wio-app", b.path("examples/app.zig"), test_dvui_and_app, example_opts, dvui_opts);
         },
+        .wgpu_glfw => {
+            dvui_opts.setDefaults(.{ .libc = true, .freetype = false, .tiny_file_dialogs = false, .stb_image = true, .tree_sitter = false });
+
+            if (dvui_opts.render_backend == .default) {
+                dvui_opts.render_backend = .wgpu;
+            }
+
+            const wgpu_glfw_mod = b.addModule("wgpu_glfw", .{
+                .root_source_file = b.path("src/backends/wgpu_glfw.zig"),
+                .target = target,
+                .optimize = optimize,
+            });
+
+            const dvui_wgpu_glfw = addDvuiModule("dvui_wgpu_glfw", dvui_opts);
+            linkBackend(dvui_wgpu_glfw, wgpu_glfw_mod);
+        },
     }
 }
 
@@ -1049,6 +1065,9 @@ pub fn addDvuiModule(
                 renderer_mod.addImport("gl", opengl.module("opengl"));
             }
         },
+        .wgpu => {
+            renderer_mod.root_source_file = b.path("src/backends/render/wgpu.zig");
+        },
     }
     renderer_mod.addImport("dvui", dvui_mod);
     dvui_mod.addImport("render_backend", renderer_mod);
@@ -1154,6 +1173,31 @@ pub fn addDvuiModule(
                 .flags = &.{"-std=c11"},
             });
         }
+    }
+
+    // Zig 0.17: @cImport removed — use translate-c to produce "c" module
+    {
+        const translate_c = b.addTranslateC(.{
+            .root_source_file = b.path("vendor/stb/dvui_c_bindings.h"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = libc,
+        });
+        translate_c.addIncludePath(b.path("vendor/stb/"));
+        const freetype_enabled = opts.freetype orelse false;
+        if (freetype_enabled) {
+            translate_c.defineCMacro("DVUI_USE_FREETYPE", "1");
+        }
+        if (!libc) {
+            translate_c.defineCMacro("DVUI_NO_LIBC", "1");
+        }
+        if (opts.accesskit.enabled()) {
+            translate_c.defineCMacro("DVUI_USE_ACCESSKIT", "1");
+            if (b.lazyDependency("accesskit", .{})) |ak_dep| {
+                translate_c.addIncludePath(ak_dep.path("include"));
+            }
+        }
+        dvui_mod.addImport("c", translate_c.createModule());
     }
 
     return dvui_mod;
