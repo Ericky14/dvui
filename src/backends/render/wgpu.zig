@@ -23,6 +23,7 @@ sampler: wgpu.WGPUSampler,
 white_texture: wgpu.WGPUTexture,
 white_view: wgpu.WGPUTextureView,
 white_bind_group: wgpu.WGPUBindGroup,
+surface_format: wgpu.WGPUTextureFormat,
 
 // Dynamic buffers (capacity in bytes)
 vertex_buffer: wgpu.WGPUBuffer,
@@ -36,12 +37,16 @@ idx_byte_offset: u64 = 0,
 
 // Frame state
 current_pass: ?wgpu.WGPURenderPassEncoder = null,
+command_encoder: ?wgpu.WGPUCommandEncoder = null,
+main_surface_view: ?wgpu.WGPUTextureView = null,
 viewport_width: f32 = 0,
 viewport_height: f32 = 0,
 
 // Texture registry
 textures: std.AutoHashMap(usize, wgpu.WGPUTextureView),
 bind_groups: std.AutoHashMap(usize, wgpu.WGPUBindGroup),
+// Render target textures (key = texture ptr → texture view for rendering into)
+target_views: std.AutoHashMap(usize, wgpu.WGPUTextureView),
 allocator: std.mem.Allocator,
 
 pub fn init(allocator: std.mem.Allocator, device: wgpu.WGPUDevice, queue: wgpu.WGPUQueue, surface_format: wgpu.WGPUTextureFormat) !@This() {
@@ -302,12 +307,14 @@ pub fn init(allocator: std.mem.Allocator, device: wgpu.WGPUDevice, queue: wgpu.W
         .white_texture = white_texture,
         .white_view = white_view,
         .white_bind_group = white_bind_group,
+        .surface_format = surface_format,
         .vertex_buffer = vertex_buffer,
         .vertex_buf_size = initial_vtx_size,
         .index_buffer = index_buffer,
         .index_buf_size = initial_idx_size,
         .textures = std.AutoHashMap(usize, wgpu.WGPUTextureView).init(allocator),
         .bind_groups = std.AutoHashMap(usize, wgpu.WGPUBindGroup).init(allocator),
+        .target_views = std.AutoHashMap(usize, wgpu.WGPUTextureView).init(allocator),
         .allocator = allocator,
     };
 }
@@ -330,10 +337,19 @@ pub fn deinit(self: *@This()) void {
     var vit = self.textures.valueIterator();
     while (vit.next()) |tv| wgpu.wgpuTextureViewRelease(tv.*);
     self.textures.deinit();
+
+    var tit = self.target_views.valueIterator();
+    while (tit.next()) |tv| wgpu.wgpuTextureViewRelease(tv.*);
+    self.target_views.deinit();
 }
 
 pub fn setRenderPass(self: *@This(), pass: wgpu.WGPURenderPassEncoder) void {
     self.current_pass = pass;
+}
+
+pub fn setCommandEncoder(self: *@This(), encoder: wgpu.WGPUCommandEncoder, surface_view: wgpu.WGPUTextureView) void {
+    self.command_encoder = encoder;
+    self.main_surface_view = surface_view;
 }
 
 pub fn setViewportSize(self: *@This(), size: struct { width: f32, height: f32 }) void {
@@ -367,9 +383,14 @@ pub fn drawClippedTriangles(self: *@This(), _: dvui.Size.Physical, texture: ?dvu
     const vtx_bytes: u64 = @intCast(vtx.len * @sizeOf(Vertex));
     const idx_bytes: u64 = @intCast(idx.len * @sizeOf(Vertex.Index));
 
+    // wgpu requires COPY_BUFFER_ALIGNMENT (4 bytes) for writeBuffer size and offset
+    const copy_align: u64 = 4;
+    const vtx_bytes_aligned = (vtx_bytes + copy_align - 1) & ~(copy_align - 1);
+    const idx_bytes_aligned = (idx_bytes + copy_align - 1) & ~(copy_align - 1);
+
     // Grow buffers if accumulated data exceeds capacity
-    const needed_vtx = self.vtx_byte_offset + vtx_bytes;
-    const needed_idx = self.idx_byte_offset + idx_bytes;
+    const needed_vtx = self.vtx_byte_offset + vtx_bytes_aligned;
+    const needed_idx = self.idx_byte_offset + idx_bytes_aligned;
 
     if (needed_vtx > self.vertex_buf_size) {
         wgpu.wgpuBufferRelease(self.vertex_buffer);
@@ -395,8 +416,8 @@ pub fn drawClippedTriangles(self: *@This(), _: dvui.Size.Physical, texture: ?dvu
     }
 
     // Upload data at current offset (sub-allocated)
-    wgpu.wgpuQueueWriteBuffer(self.queue, self.vertex_buffer, self.vtx_byte_offset, vtx.ptr, vtx_bytes);
-    wgpu.wgpuQueueWriteBuffer(self.queue, self.index_buffer, self.idx_byte_offset, idx.ptr, idx_bytes);
+    wgpu.wgpuQueueWriteBuffer(self.queue, self.vertex_buffer, self.vtx_byte_offset, vtx.ptr, vtx_bytes_aligned);
+    wgpu.wgpuQueueWriteBuffer(self.queue, self.index_buffer, self.idx_byte_offset, idx.ptr, idx_bytes_aligned);
 
     // Set pipeline and bind groups
     wgpu.wgpuRenderPassEncoderSetPipeline(pass, self.pipeline);
@@ -422,13 +443,13 @@ pub fn drawClippedTriangles(self: *@This(), _: dvui.Size.Physical, texture: ?dvu
 
     // Bind this batch's slice of the buffer and draw
     const index_format = if (@sizeOf(Vertex.Index) == 2) wgpu.WGPUIndexFormat_Uint16 else wgpu.WGPUIndexFormat_Uint32;
-    wgpu.wgpuRenderPassEncoderSetVertexBuffer(pass, 0, self.vertex_buffer, self.vtx_byte_offset, vtx_bytes);
-    wgpu.wgpuRenderPassEncoderSetIndexBuffer(pass, self.index_buffer, index_format, self.idx_byte_offset, idx_bytes);
+    wgpu.wgpuRenderPassEncoderSetVertexBuffer(pass, 0, self.vertex_buffer, self.vtx_byte_offset, vtx_bytes_aligned);
+    wgpu.wgpuRenderPassEncoderSetIndexBuffer(pass, self.index_buffer, index_format, self.idx_byte_offset, idx_bytes_aligned);
     wgpu.wgpuRenderPassEncoderDrawIndexed(pass, @intCast(idx.len), 1, 0, 0, 0);
 
     // Advance offsets for next batch
-    self.vtx_byte_offset += vtx_bytes;
-    self.idx_byte_offset += idx_bytes;
+    self.vtx_byte_offset += vtx_bytes_aligned;
+    self.idx_byte_offset += idx_bytes_aligned;
 }
 
 pub fn textureCreate(self: *@This(), pixels: [*]const u8, width: u32, height: u32, _: dvui.enums.TextureInterpolation, _: dvui.enums.TexturePixelFormat) !dvui.Texture {
@@ -503,20 +524,195 @@ pub fn textureDestroy(self: *@This(), texture: dvui.Texture) void {
     wgpu.wgpuTextureRelease(tex);
 }
 
-pub fn textureCreateTarget(_: *@This(), _: u32, _: u32, _: dvui.enums.TextureInterpolation, _: dvui.enums.TexturePixelFormat) !dvui.TextureTarget {
-    return error.NotImplemented;
+pub fn textureCreateTarget(self: *@This(), width: u32, height: u32, _: dvui.enums.TextureInterpolation, format: dvui.enums.TexturePixelFormat) !dvui.TextureTarget {
+    _ = format;
+    const tex = wgpu.wgpuDeviceCreateTexture(self.device, &wgpu.WGPUTextureDescriptor{
+        .nextInChain = null,
+        .label = .{ .data = "dvui_target", .length = 11 },
+        .usage = wgpu.WGPUTextureUsage_RenderAttachment | wgpu.WGPUTextureUsage_TextureBinding | wgpu.WGPUTextureUsage_CopyDst | wgpu.WGPUTextureUsage_CopySrc,
+        .dimension = wgpu.WGPUTextureDimension_2D,
+        .size = .{ .width = width, .height = height, .depthOrArrayLayers = 1 },
+        .format = self.surface_format,
+        .mipLevelCount = 1,
+        .sampleCount = 1,
+        .viewFormatCount = 0,
+        .viewFormats = null,
+    }) orelse return error.TextureCreate;
+
+    const view = wgpu.wgpuTextureCreateView(tex, null) orelse {
+        wgpu.wgpuTextureRelease(tex);
+        return error.TextureCreate;
+    };
+
+    // Create bind group for sampling this texture
+    const bg = wgpu.wgpuDeviceCreateBindGroup(self.device, &wgpu.WGPUBindGroupDescriptor{
+        .nextInChain = null,
+        .label = .{ .data = "dvui_target_bg", .length = 14 },
+        .layout = self.texture_bgl,
+        .entryCount = 2,
+        .entries = &[_]wgpu.WGPUBindGroupEntry{
+            .{ .nextInChain = null, .binding = 0, .buffer = null, .offset = 0, .size = 0, .sampler = null, .textureView = view },
+            .{ .nextInChain = null, .binding = 1, .buffer = null, .offset = 0, .size = 0, .sampler = self.sampler, .textureView = null },
+        },
+    }) orelse {
+        wgpu.wgpuTextureViewRelease(view);
+        wgpu.wgpuTextureRelease(tex);
+        return error.TextureCreate;
+    };
+
+    const key = @intFromPtr(tex);
+    try self.textures.put(key, view);
+    try self.bind_groups.put(key, bg);
+    // Store a second view for rendering into this texture
+    const render_view = wgpu.wgpuTextureCreateView(tex, null) orelse {
+        return error.TextureCreate;
+    };
+    try self.target_views.put(key, render_view);
+
+    return .{ .ptr = tex, .width = width, .height = height, .format = .rgba_32 };
 }
 
-pub fn textureFromTarget(_: *@This(), _: dvui.TextureTarget) dvui.Texture {
-    return .{ .ptr = undefined, .width = 0, .height = 0, .format = .rgba_32 };
+pub fn textureFromTarget(_: *@This(), target: dvui.TextureTarget) dvui.Texture {
+    return .{ .ptr = target.ptr, .width = target.width, .height = target.height, .format = target.format };
 }
 
-pub fn textureDestroyTarget(_: *@This(), _: dvui.Texture.Target) void {}
+pub fn textureFromTargetTemp(_: *@This(), target: dvui.TextureTarget) dvui.Texture {
+    return .{ .ptr = target.ptr, .width = target.width, .height = target.height, .format = target.format };
+}
 
-pub fn textureClearTarget(_: *@This(), _: dvui.Texture.Target) void {}
+pub fn textureDestroyTarget(self: *@This(), texture: dvui.Texture.Target) void {
+    const key = @intFromPtr(texture.ptr);
+    if (self.bind_groups.fetchRemove(key)) |kv| wgpu.wgpuBindGroupRelease(kv.value);
+    if (self.textures.fetchRemove(key)) |kv| wgpu.wgpuTextureViewRelease(kv.value);
+    if (self.target_views.fetchRemove(key)) |kv| wgpu.wgpuTextureViewRelease(kv.value);
+    const tex: wgpu.WGPUTexture = @ptrCast(texture.ptr);
+    wgpu.wgpuTextureRelease(tex);
+}
+
+pub fn textureClearTarget(self: *@This(), texture: dvui.Texture.Target) void {
+    const key = @intFromPtr(texture.ptr);
+    const render_view = self.target_views.get(key) orelse return;
+    const encoder = self.command_encoder orelse return;
+
+    // End current pass temporarily
+    if (self.current_pass) |pass| {
+        wgpu.wgpuRenderPassEncoderEnd(pass);
+        wgpu.wgpuRenderPassEncoderRelease(pass);
+    }
+
+    // Clear pass on the target
+    const clear_pass = wgpu.wgpuCommandEncoderBeginRenderPass(encoder, &wgpu.WGPURenderPassDescriptor{
+        .nextInChain = null,
+        .label = .{ .data = "dvui_clear", .length = 10 },
+        .colorAttachmentCount = 1,
+        .colorAttachments = &wgpu.WGPURenderPassColorAttachment{
+            .view = render_view,
+            .depthSlice = wgpu.WGPU_DEPTH_SLICE_UNDEFINED,
+            .resolveTarget = null,
+            .loadOp = wgpu.WGPULoadOp_Clear,
+            .storeOp = wgpu.WGPUStoreOp_Store,
+            .clearValue = .{ .r = 0.0, .g = 0.0, .b = 0.0, .a = 0.0 },
+        },
+        .depthStencilAttachment = null,
+        .occlusionQuerySet = null,
+        .timestampWrites = null,
+    }) orelse {
+        // Restore main pass
+        self.restoreMainPass();
+        return;
+    };
+    wgpu.wgpuRenderPassEncoderEnd(clear_pass);
+    wgpu.wgpuRenderPassEncoderRelease(clear_pass);
+
+    // Restore main pass
+    self.restoreMainPass();
+}
 
 pub fn textureReadTarget(_: *@This(), _: dvui.TextureTarget, _: [*]u8) !void {
     return error.NotImplemented;
 }
 
-pub fn renderTarget(_: *@This(), _: dvui.TextureTarget) void {}
+pub fn renderTarget(self: *@This(), maybe_target: ?dvui.TextureTarget) void {
+    const encoder = self.command_encoder orelse return;
+
+    // End current pass
+    if (self.current_pass) |pass| {
+        wgpu.wgpuRenderPassEncoderEnd(pass);
+        wgpu.wgpuRenderPassEncoderRelease(pass);
+        self.current_pass = null;
+    }
+
+    if (maybe_target) |target| {
+        // Render to the texture target
+        const key = @intFromPtr(target.ptr);
+        const render_view = self.target_views.get(key) orelse return;
+
+        const new_pass = wgpu.wgpuCommandEncoderBeginRenderPass(encoder, &wgpu.WGPURenderPassDescriptor{
+            .nextInChain = null,
+            .label = .{ .data = "dvui_rt", .length = 7 },
+            .colorAttachmentCount = 1,
+            .colorAttachments = &wgpu.WGPURenderPassColorAttachment{
+                .view = render_view,
+                .depthSlice = wgpu.WGPU_DEPTH_SLICE_UNDEFINED,
+                .resolveTarget = null,
+                .loadOp = wgpu.WGPULoadOp_Load,
+                .storeOp = wgpu.WGPUStoreOp_Store,
+                .clearValue = .{ .r = 0.0, .g = 0.0, .b = 0.0, .a = 0.0 },
+            },
+            .depthStencilAttachment = null,
+            .occlusionQuerySet = null,
+            .timestampWrites = null,
+        }) orelse return;
+
+        self.current_pass = new_pass;
+
+        // Update projection for the target size
+        const w: f32 = @floatFromInt(target.width);
+        const h: f32 = @floatFromInt(target.height);
+        const projection = [16]f32{
+            2.0 / w, 0,        0, 0,
+            0,       -2.0 / h, 0, 0,
+            0,       0,        1, 0,
+            -1,      1,        0, 1,
+        };
+        wgpu.wgpuQueueWriteBuffer(self.queue, self.uniform_buffer, 0, &projection, @sizeOf(@TypeOf(projection)));
+    } else {
+        // Restore to main surface
+        self.restoreMainPass();
+    }
+}
+
+fn restoreMainPass(self: *@This()) void {
+    const encoder = self.command_encoder orelse return;
+    const surface_view = self.main_surface_view orelse return;
+
+    const new_pass = wgpu.wgpuCommandEncoderBeginRenderPass(encoder, &wgpu.WGPURenderPassDescriptor{
+        .nextInChain = null,
+        .label = .{ .data = "dvui_main", .length = 9 },
+        .colorAttachmentCount = 1,
+        .colorAttachments = &wgpu.WGPURenderPassColorAttachment{
+            .view = surface_view,
+            .depthSlice = wgpu.WGPU_DEPTH_SLICE_UNDEFINED,
+            .resolveTarget = null,
+            .loadOp = wgpu.WGPULoadOp_Load,
+            .storeOp = wgpu.WGPUStoreOp_Store,
+            .clearValue = .{ .r = 0.0, .g = 0.0, .b = 0.0, .a = 1.0 },
+        },
+        .depthStencilAttachment = null,
+        .occlusionQuerySet = null,
+        .timestampWrites = null,
+    }) orelse return;
+
+    self.current_pass = new_pass;
+
+    // Restore viewport projection
+    const w = self.viewport_width;
+    const h = self.viewport_height;
+    const projection = [16]f32{
+        2.0 / w, 0,        0, 0,
+        0,       -2.0 / h, 0, 0,
+        0,       0,        1, 0,
+        -1,      1,        0, 1,
+    };
+    wgpu.wgpuQueueWriteBuffer(self.queue, self.uniform_buffer, 0, &projection, @sizeOf(@TypeOf(projection)));
+}
