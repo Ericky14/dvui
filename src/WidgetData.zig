@@ -245,7 +245,7 @@ pub fn borderAndBackground(self: *const WidgetData, opts: struct {
             const fill = opts.fill_color orelse self.options.color(.fill);
             rs.r.fill(self.options.corner_radiusGet().scale(rs.s, Rect.Physical), .{
                 .color = fill,
-                .fade = if (ninepatch != null or dvui.windowNaturalScale() >= 2.0) 0.0 else 1.0,
+                .fade = if (ninepatch != null) 0.0 else if (dvui.windowNaturalScale() >= 2.0) 0.0 else 1.0,
             });
         }
     }

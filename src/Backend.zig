@@ -83,6 +83,44 @@ pub fn drawClippedTriangles(self: Backend, texture: ?dvui.Texture, vtx: []const 
     }
 }
 
+/// Draw an SDF rounded rectangle. The rect data contains position, size,
+/// corner radii, fill color, border color, and border width.
+pub fn drawSdfRect(self: Backend, sdf_rect: dvui.SdfRect, clipr: ?dvui.Rect.Physical) GenericError!void {
+    if (dvui.render_backend.kind == .default) {
+        if (@hasDecl(Implementation, "drawSdfRect")) {
+            try self.impl.drawSdfRect(sdf_rect, clipr);
+        } else {
+            // Fallback: render as tessellated path (for backends without SDF support)
+            try self.drawSdfRectFallback(sdf_rect, clipr);
+        }
+    } else {
+        if (@hasDecl(dvui.render_backend, "drawSdfRect")) {
+            try self.renderer().drawSdfRect(sdf_rect, clipr);
+        } else {
+            try self.drawSdfRectFallback(sdf_rect, clipr);
+        }
+    }
+}
+
+fn drawSdfRectFallback(self: Backend, sdf_rect: dvui.SdfRect, clipr: ?dvui.Rect.Physical) GenericError!void {
+    // Fallback: use tessellated path rendering for backends without SDF
+    _ = self;
+    _ = clipr;
+    const rect: dvui.Rect.Physical = .{ .x = sdf_rect.pos.x, .y = sdf_rect.pos.y, .w = sdf_rect.size.w, .h = sdf_rect.size.h };
+    if (sdf_rect.fill_color.a > 0) {
+        var path: dvui.Path.Builder = .init(dvui.currentWindow().lifo());
+        defer path.deinit();
+        path.addRect(rect, sdf_rect.radii);
+        path.build().fillConvex(.{ .color = sdf_rect.fill_color, .fade = 1.0 });
+    }
+    if (sdf_rect.border_width > 0 and sdf_rect.border_color.a > 0) {
+        var path: dvui.Path.Builder = .init(dvui.currentWindow().lifo());
+        defer path.deinit();
+        path.addRect(rect, sdf_rect.radii);
+        path.build().stroke(.{ .thickness = sdf_rect.border_width, .color = sdf_rect.border_color, .closed = true });
+    }
+}
+
 /// Create a `dvui.Texture` from premultiplied alpha `pixels` in RGBA.  The
 /// returned pointer is what will later be passed to `drawClippedTriangles`.
 pub fn textureCreate(self: Backend, pixels: [*]const u8, width: u32, height: u32, interpolation: dvui.enums.TextureInterpolation, format: dvui.enums.TexturePixelFormat) TextureError!dvui.Texture {

@@ -1349,6 +1349,12 @@ pub fn renderCommands(self: *Self, queue: []const dvui.RenderCommand) !void {
                 defer triangles.deinit(self.lifo());
                 try dvui.renderTriangles(triangles, null);
             },
+            .sdfRect => |sr| {
+                var rect = sr;
+                rect.fill_color = rect.fill_color.opacity(self.alpha);
+                rect.border_color = rect.border_color.opacity(self.alpha);
+                try dvui.renderSdfRect(rect);
+            },
             .triangles => |t| {
                 try dvui.renderTriangles(t.tri, t.tex);
             },

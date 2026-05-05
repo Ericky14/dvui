@@ -26,6 +26,23 @@ pub const Target = struct {
     }
 };
 
+/// SDF rounded rectangle data for GPU rendering.
+/// All coordinates are in physical pixels.
+pub const SdfRect = struct {
+    /// Top-left position
+    pos: Point.Physical,
+    /// Width and height
+    size: Size.Physical,
+    /// Corner radii: x=top-left, y=top-right, w=bottom-right, h=bottom-left
+    radii: Rect.Physical,
+    /// Fill color
+    fill_color: Color,
+    /// Border color
+    border_color: Color,
+    /// Border width in physical pixels
+    border_width: f32,
+};
+
 /// Represents a deferred call to one of the render functions.  This is how
 /// dvui defers rendering of floating windows so they render on top of widgets
 /// that run later in the frame.
@@ -51,6 +68,7 @@ pub const RenderCommand = struct {
             path: Path,
             opts: Path.StrokeOptions,
         },
+        sdfRect: SdfRect,
         triangles: struct {
             tri: Triangles,
             tex: ?Texture,
@@ -98,6 +116,40 @@ pub fn renderTriangles(triangles: Triangles, tex: ?Texture) Backend.GenericError
     }
 
     try cw.backend.drawClippedTriangles(tex, triangles.vertexes, triangles.indices, clipr);
+}
+
+/// Render an SDF rounded rectangle, respecting the current clip rect and
+/// deferred rendering through render targets.
+///
+/// Only valid between `Window.begin` and `Window.end`.
+pub fn renderSdfRect(sdf_rect: SdfRect) Backend.GenericError!void {
+    if (dvui.clipGet().empty()) {
+        return;
+    }
+
+    const cw = dvui.currentWindow();
+
+    if (!cw.render_target.rendering) {
+        cw.addRenderCommand(.{ .sdfRect = sdf_rect }, false);
+        return;
+    }
+
+    // expand clipping to full pixels before testing
+    var clipping = dvui.clipGet();
+    clipping.w = @max(0, @ceil(clipping.x - @floor(clipping.x) + clipping.w));
+    clipping.x = @floor(clipping.x);
+    clipping.h = @max(0, @ceil(clipping.y - @floor(clipping.y) + clipping.h));
+    clipping.y = @floor(clipping.y);
+
+    var rect = sdf_rect;
+    if (cw.render_target.offset.nonZero()) {
+        rect.pos = rect.pos.diff(cw.render_target.offset);
+    }
+
+    const rect_bounds: Rect.Physical = .{ .x = rect.pos.x, .y = rect.pos.y, .w = rect.size.w, .h = rect.size.h };
+    const clipr: ?Rect.Physical = if (rect_bounds.clippedBy(clipping)) clipping.offsetNegPoint(cw.render_target.offset) else null;
+
+    try cw.backend.drawSdfRect(rect, clipr);
 }
 
 pub const TextOptions = struct {

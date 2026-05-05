@@ -228,6 +228,19 @@ pub fn RectType(comptime units: dvui.enums.Units) type {
         ///
         /// Only valid between dvui.Window.begin() and end().
         pub fn stroke(self: Rect.Physical, radius: Rect.Physical, opts: dvui.Path.StrokeOptions) void {
+            if (radius.nonZero()) {
+                dvui.renderSdfRect(.{
+                    .pos = .{ .x = self.x, .y = self.y },
+                    .size = .{ .w = self.w, .h = self.h },
+                    .radii = radius,
+                    .fill_color = dvui.Color{ .r = 0, .g = 0, .b = 0, .a = 0 },
+                    .border_color = opts.color,
+                    .border_width = opts.thickness,
+                }) catch |err| {
+                    dvui.log.err("SDF stroke error: {}", .{err});
+                };
+                return;
+            }
             var path: dvui.Path.Builder = .init(dvui.currentWindow().lifo());
             defer path.deinit();
 
@@ -247,6 +260,19 @@ pub fn RectType(comptime units: dvui.enums.Units) type {
         ///
         /// Only valid between dvui.Window.begin() and end().
         pub fn fill(self: Rect.Physical, radius: Rect.Physical, opts: dvui.Path.FillConvexOptions) void {
+            if (radius.nonZero()) {
+                dvui.renderSdfRect(.{
+                    .pos = .{ .x = self.x, .y = self.y },
+                    .size = .{ .w = self.w, .h = self.h },
+                    .radii = radius,
+                    .fill_color = opts.color,
+                    .border_color = dvui.Color{ .r = 0, .g = 0, .b = 0, .a = 0 },
+                    .border_width = 0,
+                }) catch |err| {
+                    dvui.log.err("SDF fill error: {}", .{err});
+                };
+                return;
+            }
             var path: dvui.Path.Builder = .init(dvui.currentWindow().lifo());
             defer path.deinit();
 

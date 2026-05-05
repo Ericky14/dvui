@@ -12,10 +12,22 @@ pub const kind: dvui.enums.RenderBackend = .wgpu;
 
 const Vertex = dvui.Vertex;
 
+/// GPU instance data for SDF rounded rects (72 bytes per instance).
+/// Must match the vertex attribute layout in the SDF pipeline.
+const SdfInstanceData = extern struct {
+    rect_pos: [2]f32, // top-left position
+    rect_size: [2]f32, // width, height
+    radii: [4]f32, // TL, TR, BR, BL corner radii
+    fill_color: [4]f32, // premultiplied RGBA
+    border_color: [4]f32, // premultiplied RGBA
+    border_softness: [2]f32, // border_width, softness (unused for now)
+};
+
 // GPU state
 device: wgpu.WGPUDevice,
 queue: wgpu.WGPUQueue,
 pipeline: wgpu.WGPURenderPipeline,
+sdf_pipeline: wgpu.WGPURenderPipeline,
 uniform_buffer: wgpu.WGPUBuffer,
 uniform_bind_group: wgpu.WGPUBindGroup,
 texture_bgl: wgpu.WGPUBindGroupLayout,
@@ -30,6 +42,11 @@ vertex_buffer: wgpu.WGPUBuffer,
 vertex_buf_size: u64,
 index_buffer: wgpu.WGPUBuffer,
 index_buf_size: u64,
+
+// SDF instance buffer
+sdf_instance_buffer: wgpu.WGPUBuffer,
+sdf_instance_buf_size: u64,
+sdf_instance_byte_offset: u64 = 0,
 
 // Per-frame sub-allocation offsets (bytes)
 vtx_byte_offset: u64 = 0,
@@ -296,10 +313,112 @@ pub fn init(allocator: std.mem.Allocator, device: wgpu.WGPUDevice, queue: wgpu.W
         .mappedAtCreation = @intFromBool(false),
     }) orelse return error.BackendError;
 
+    // --- SDF Rounded Rect Pipeline ---
+    const sdf_shader_code = @embedFile("wgpu_sdf_rect.wgsl");
+    var sdf_shader_source = wgpu.WGPUShaderSourceWGSL{
+        .chain = .{ .next = null, .sType = wgpu.WGPUSType_ShaderSourceWGSL },
+        .code = .{ .data = sdf_shader_code.ptr, .length = sdf_shader_code.len },
+    };
+    const sdf_shader_module = wgpu.wgpuDeviceCreateShaderModule(device, &wgpu.WGPUShaderModuleDescriptor{
+        .nextInChain = @ptrCast(&sdf_shader_source),
+        .label = .{ .data = "dvui_sdf_shader", .length = 15 },
+    }) orelse return error.BackendError;
+    defer wgpu.wgpuShaderModuleRelease(sdf_shader_module);
+
+    // SDF pipeline layout (only needs uniform bind group, no texture)
+    const sdf_pipeline_layout = wgpu.wgpuDeviceCreatePipelineLayout(device, &wgpu.WGPUPipelineLayoutDescriptor{
+        .nextInChain = null,
+        .label = .{ .data = "dvui_sdf_layout", .length = 15 },
+        .bindGroupLayoutCount = 1,
+        .bindGroupLayouts = &[_]wgpu.WGPUBindGroupLayout{uniform_bgl},
+    }) orelse return error.BackendError;
+    defer wgpu.wgpuPipelineLayoutRelease(sdf_pipeline_layout);
+
+    // SDF instance attributes (per-instance data)
+    const sdf_instance_attributes = [_]wgpu.WGPUVertexAttribute{
+        .{ .format = wgpu.WGPUVertexFormat_Float32x2, .offset = 0, .shaderLocation = 0 }, // rect_pos
+        .{ .format = wgpu.WGPUVertexFormat_Float32x2, .offset = 8, .shaderLocation = 1 }, // rect_size
+        .{ .format = wgpu.WGPUVertexFormat_Float32x4, .offset = 16, .shaderLocation = 2 }, // radii
+        .{ .format = wgpu.WGPUVertexFormat_Float32x4, .offset = 32, .shaderLocation = 3 }, // fill_color
+        .{ .format = wgpu.WGPUVertexFormat_Float32x4, .offset = 48, .shaderLocation = 4 }, // border_color
+        .{ .format = wgpu.WGPUVertexFormat_Float32x2, .offset = 64, .shaderLocation = 5 }, // border_softness
+    };
+
+    const sdf_pipeline = wgpu.wgpuDeviceCreateRenderPipeline(device, &wgpu.WGPURenderPipelineDescriptor{
+        .nextInChain = null,
+        .label = .{ .data = "dvui_sdf_pipe", .length = 13 },
+        .layout = sdf_pipeline_layout,
+        .vertex = .{
+            .nextInChain = null,
+            .module = sdf_shader_module,
+            .entryPoint = .{ .data = "vs_main", .length = 7 },
+            .constantCount = 0,
+            .constants = null,
+            .bufferCount = 1,
+            .buffers = &[_]wgpu.WGPUVertexBufferLayout{.{
+                .arrayStride = @sizeOf(SdfInstanceData),
+                .stepMode = wgpu.WGPUVertexStepMode_Instance,
+                .attributeCount = sdf_instance_attributes.len,
+                .attributes = &sdf_instance_attributes,
+            }},
+        },
+        .primitive = .{
+            .nextInChain = null,
+            .topology = wgpu.WGPUPrimitiveTopology_TriangleList,
+            .stripIndexFormat = wgpu.WGPUIndexFormat_Undefined,
+            .frontFace = wgpu.WGPUFrontFace_CCW,
+            .cullMode = wgpu.WGPUCullMode_None,
+            .unclippedDepth = @intFromBool(false),
+        },
+        .depthStencil = null,
+        .multisample = .{
+            .nextInChain = null,
+            .count = 1,
+            .mask = 0xFFFFFFFF,
+            .alphaToCoverageEnabled = @intFromBool(false),
+        },
+        .fragment = &.{
+            .nextInChain = null,
+            .module = sdf_shader_module,
+            .entryPoint = .{ .data = "fs_main", .length = 7 },
+            .constantCount = 0,
+            .constants = null,
+            .targetCount = 1,
+            .targets = &[_]wgpu.WGPUColorTargetState{.{
+                .nextInChain = null,
+                .format = surface_format,
+                .blend = &.{
+                    .color = .{
+                        .operation = wgpu.WGPUBlendOperation_Add,
+                        .srcFactor = wgpu.WGPUBlendFactor_One,
+                        .dstFactor = wgpu.WGPUBlendFactor_OneMinusSrcAlpha,
+                    },
+                    .alpha = .{
+                        .operation = wgpu.WGPUBlendOperation_Add,
+                        .srcFactor = wgpu.WGPUBlendFactor_One,
+                        .dstFactor = wgpu.WGPUBlendFactor_OneMinusSrcAlpha,
+                    },
+                },
+                .writeMask = wgpu.WGPUColorWriteMask_All,
+            }},
+        },
+    }) orelse return error.BackendError;
+
+    // SDF instance buffer
+    const initial_sdf_size: u64 = 256 * @sizeOf(SdfInstanceData);
+    const sdf_instance_buffer = wgpu.wgpuDeviceCreateBuffer(device, &wgpu.WGPUBufferDescriptor{
+        .nextInChain = null,
+        .label = .{ .data = "dvui_sdf_inst", .length = 13 },
+        .usage = wgpu.WGPUBufferUsage_Vertex | wgpu.WGPUBufferUsage_CopyDst,
+        .size = initial_sdf_size,
+        .mappedAtCreation = @intFromBool(false),
+    }) orelse return error.BackendError;
+
     return .{
         .device = device,
         .queue = queue,
         .pipeline = pipeline,
+        .sdf_pipeline = sdf_pipeline,
         .uniform_buffer = uniform_buffer,
         .uniform_bind_group = uniform_bind_group,
         .texture_bgl = texture_bgl,
@@ -312,6 +431,8 @@ pub fn init(allocator: std.mem.Allocator, device: wgpu.WGPUDevice, queue: wgpu.W
         .vertex_buf_size = initial_vtx_size,
         .index_buffer = index_buffer,
         .index_buf_size = initial_idx_size,
+        .sdf_instance_buffer = sdf_instance_buffer,
+        .sdf_instance_buf_size = initial_sdf_size,
         .textures = std.AutoHashMap(usize, wgpu.WGPUTextureView).init(allocator),
         .bind_groups = std.AutoHashMap(usize, wgpu.WGPUBindGroup).init(allocator),
         .target_views = std.AutoHashMap(usize, wgpu.WGPUTextureView).init(allocator),
@@ -328,7 +449,9 @@ pub fn deinit(self: *@This()) void {
     wgpu.wgpuBindGroupRelease(self.uniform_bind_group);
     wgpu.wgpuBufferRelease(self.vertex_buffer);
     wgpu.wgpuBufferRelease(self.index_buffer);
+    wgpu.wgpuBufferRelease(self.sdf_instance_buffer);
     wgpu.wgpuRenderPipelineRelease(self.pipeline);
+    wgpu.wgpuRenderPipelineRelease(self.sdf_pipeline);
 
     var it = self.bind_groups.valueIterator();
     while (it.next()) |bg| wgpu.wgpuBindGroupRelease(bg.*);
@@ -371,6 +494,7 @@ pub fn setViewportSize(self: *@This(), size: struct { width: f32, height: f32 })
 pub fn begin(self: *@This(), _: std.mem.Allocator) !void {
     self.vtx_byte_offset = 0;
     self.idx_byte_offset = 0;
+    self.sdf_instance_byte_offset = 0;
 }
 
 pub fn end(_: *@This()) !void {}
@@ -450,6 +574,76 @@ pub fn drawClippedTriangles(self: *@This(), _: dvui.Size.Physical, texture: ?dvu
     // Advance offsets for next batch
     self.vtx_byte_offset += vtx_bytes_aligned;
     self.idx_byte_offset += idx_bytes_aligned;
+}
+
+pub fn drawSdfRect(self: *@This(), sdf_rect: dvui.SdfRect, clipr: ?dvui.Rect.Physical) !void {
+    const pass = self.current_pass orelse return;
+
+    // Convert Color (u8 RGBA) to premultiplied f32
+    const fill_pma = dvui.Color.PMA.fromColor(sdf_rect.fill_color);
+    const border_pma = dvui.Color.PMA.fromColor(sdf_rect.border_color);
+
+    const instance = SdfInstanceData{
+        .rect_pos = .{ sdf_rect.pos.x, sdf_rect.pos.y },
+        .rect_size = .{ sdf_rect.size.w, sdf_rect.size.h },
+        .radii = .{ sdf_rect.radii.x, sdf_rect.radii.y, sdf_rect.radii.w, sdf_rect.radii.h },
+        .fill_color = .{
+            @as(f32, @floatFromInt(fill_pma.r)) / 255.0,
+            @as(f32, @floatFromInt(fill_pma.g)) / 255.0,
+            @as(f32, @floatFromInt(fill_pma.b)) / 255.0,
+            @as(f32, @floatFromInt(fill_pma.a)) / 255.0,
+        },
+        .border_color = .{
+            @as(f32, @floatFromInt(border_pma.r)) / 255.0,
+            @as(f32, @floatFromInt(border_pma.g)) / 255.0,
+            @as(f32, @floatFromInt(border_pma.b)) / 255.0,
+            @as(f32, @floatFromInt(border_pma.a)) / 255.0,
+        },
+        .border_softness = .{ sdf_rect.border_width, 1.0 },
+    };
+
+    const inst_bytes: u64 = @sizeOf(SdfInstanceData);
+    const copy_align: u64 = 4;
+    const inst_bytes_aligned = (inst_bytes + copy_align - 1) & ~(copy_align - 1);
+
+    // Grow buffer if needed
+    const needed = self.sdf_instance_byte_offset + inst_bytes_aligned;
+    if (needed > self.sdf_instance_buf_size) {
+        wgpu.wgpuBufferRelease(self.sdf_instance_buffer);
+        self.sdf_instance_buf_size = @max(needed, self.sdf_instance_buf_size * 2);
+        self.sdf_instance_buffer = wgpu.wgpuDeviceCreateBuffer(self.device, &wgpu.WGPUBufferDescriptor{
+            .nextInChain = null,
+            .label = .{ .data = "dvui_sdf_inst", .length = 13 },
+            .usage = wgpu.WGPUBufferUsage_Vertex | wgpu.WGPUBufferUsage_CopyDst,
+            .size = self.sdf_instance_buf_size,
+            .mappedAtCreation = @intFromBool(false),
+        }) orelse return error.BackendError;
+    }
+
+    // Upload instance data
+    wgpu.wgpuQueueWriteBuffer(self.queue, self.sdf_instance_buffer, self.sdf_instance_byte_offset, @as([*]const u8, @ptrCast(&instance)), inst_bytes_aligned);
+
+    // Set SDF pipeline
+    wgpu.wgpuRenderPassEncoderSetPipeline(pass, self.sdf_pipeline);
+    wgpu.wgpuRenderPassEncoderSetBindGroup(pass, 0, self.uniform_bind_group, 0, null);
+
+    // Scissor rect
+    if (clipr) |clip| {
+        const x: u32 = @intFromFloat(@max(0, clip.x));
+        const y: u32 = @intFromFloat(@max(0, clip.y));
+        const w: u32 = @intFromFloat(@max(0, clip.w));
+        const h: u32 = @intFromFloat(@max(0, clip.h));
+        wgpu.wgpuRenderPassEncoderSetScissorRect(pass, x, y, w, h);
+    } else {
+        wgpu.wgpuRenderPassEncoderSetScissorRect(pass, 0, 0, @intFromFloat(self.viewport_width), @intFromFloat(self.viewport_height));
+    }
+
+    // Bind instance buffer and draw 6 vertices (quad) for 1 instance
+    wgpu.wgpuRenderPassEncoderSetVertexBuffer(pass, 0, self.sdf_instance_buffer, self.sdf_instance_byte_offset, inst_bytes_aligned);
+    wgpu.wgpuRenderPassEncoderDraw(pass, 6, 1, 0, 0);
+
+    // Advance offset
+    self.sdf_instance_byte_offset += inst_bytes_aligned;
 }
 
 pub fn textureCreate(self: *@This(), pixels: [*]const u8, width: u32, height: u32, _: dvui.enums.TextureInterpolation, _: dvui.enums.TexturePixelFormat) !dvui.Texture {
