@@ -48,27 +48,39 @@ pub const Style = enum {
 /// Changing any of these might query for a font.
 family: [NAME_MAX_LEN:0]u8 = @splat(0),
 
-/// Height of a capital M in logical pixels.  After converting to physical
-/// pixels, the font will have an integer M height <= size.
+/// Font size in logical pixels. Interpretation depends on `size_mode`:
+/// - `.cap_height` (default): Height of a capital M. After converting to physical
+///   pixels, the font will have an integer M height <= size.
+/// - `.pixel`: CSS-style em-square size. The FreeType pixel_size is set directly
+///   to this value without cap-height searching.
 size: f32 = DefaultSize,
 weight: Weight = .normal,
 style: Style = .normal,
+size_mode: SizeMode = .cap_height,
 
 /// Can be changed for any font, no query.
 line_height_factor: f32 = 1.2,
 
+pub const SizeMode = enum {
+    /// Default: size = cap height (M glyph must fit within `size` px).
+    cap_height,
+    /// CSS/iced-compatible: size = em-square pixels (FreeType pixel_size set directly).
+    pixel,
+};
+
 pub const FindOptions = struct {
     family: []const u8,
 
-    /// Height of capital M in logical pixels.
+    /// Font size in logical pixels. See `SizeMode` for interpretation.
     size: f32 = DefaultSize,
     weight: Weight = .normal,
     style: Style = .normal,
     line_height_factor: f32 = 1.2,
+    size_mode: SizeMode = .cap_height,
 };
 
 pub fn find(opts: FindOptions) Font {
-    return (Font{}).withFamily(opts.family).withSize(opts.size).withWeight(opts.weight).withStyle(opts.style).withLineHeight(opts.line_height_factor);
+    return (Font{}).withFamily(opts.family).withSize(opts.size).withWeight(opts.weight).withStyle(opts.style).withLineHeight(opts.line_height_factor).withSizeMode(opts.size_mode);
 }
 
 pub const ThemeFontName = enum {
@@ -123,6 +135,12 @@ pub fn withLineHeight(self: Font, factor: f32) Font {
     return r;
 }
 
+pub fn withSizeMode(self: Font, mode: SizeMode) Font {
+    var r = self;
+    r.size_mode = mode;
+    return r;
+}
+
 pub fn familyName(self: *const Font) []const u8 {
     return string(&self.family);
 }
@@ -158,6 +176,7 @@ pub fn hash(self: *const Font) u64 {
     h.update(std.mem.asBytes(&self.size));
     h.update(std.mem.asBytes(&self.weight));
     h.update(std.mem.asBytes(&self.style));
+    h.update(std.mem.asBytes(&self.size_mode));
     return h.final();
 }
 
@@ -439,8 +458,40 @@ pub const Cache = struct {
                     return Error.FontError;
                 };
 
-                // "pixel size" for freetype doesn't actually mean you'll get that height, it's more like using pts
-                // so we search for a font that has a height <= font.size
+                if (font.size_mode == .pixel) {
+                    // CSS/iced-compatible mode: use size directly as FT pixel size.
+                    const pixel_size = @as(u32, @intFromFloat(@max(min_pixel_size, @round(font.size))));
+                    FreeType.intToError(c.FT_Set_Pixel_Sizes(face, pixel_size, pixel_size)) catch |err| {
+                        dvui.log.warn("Font.Cache.Entry.init() freetype error {any} trying to FT_Set_Pixel_Sizes font {s}\n", .{ err, fname });
+                        return Error.FontError;
+                    };
+
+                    const ascender = @as(f32, @floatFromInt(face.*.ascender)) / 64.0;
+                    const ss = @as(f32, @floatFromInt(face.*.size.*.metrics.y_scale)) / 0x10000;
+                    const ascent = ascender * ss;
+                    const descender = @as(f32, @floatFromInt(face.*.descender)) / 64.0;
+                    const descent = descender * ss;
+
+                    var entry: Entry = .{
+                        .face = face,
+                        .name = fname,
+                        .scaleFactor = 1.0,
+                        .height = ascent - descent,
+                        .ascent = @trunc(ascent),
+                        .em_height = undefined,
+                        .glyph_info_ascii = undefined,
+                    };
+
+                    const M = try entry.glyphInfoGenerate('M');
+                    if (M.h <= 0) {
+                        dvui.log.warn("Font.Cache.Entry.init() freetype error getting M font {s} size {d}\n", .{ fname, font.size });
+                        return error.FontError;
+                    }
+                    entry.em_height = M.h;
+                    break :blk entry;
+                }
+
+                // Default cap_height mode: search for a pixel_size where M.h <= font.size
                 var pixel_size = @as(u32, @intFromFloat(@max(min_pixel_size, @floor(font.size))));
                 pixel_size += 20;
 
@@ -509,7 +560,16 @@ pub const Cache = struct {
                     dvui.log.warn("Font.Cache.Entry.init() stbtt error getting M font {s} size {d}\n", .{ fname, font.size });
                     return error.FontError;
                 }
-                entry.scaleFactor = @max(min_pixel_size, @floor(font.size)) / M.h;
+
+                if (font.size_mode == .pixel) {
+                    // CSS mode: scale so that em-square = font.size pixels.
+                    // stbtt: scaleFactor = desired_px / unscaled_height.
+                    // Unscaled height = face_ascent - face_descent (in font units).
+                    const unscaled_height = @as(f32, @floatFromInt(face_ascent - face_descent));
+                    entry.scaleFactor = font.size / unscaled_height;
+                } else {
+                    entry.scaleFactor = @max(min_pixel_size, @floor(font.size)) / M.h;
+                }
                 const ascender = entry.scaleFactor * @as(f32, @floatFromInt(face_ascent));
                 const descender = entry.scaleFactor * @as(f32, @floatFromInt(face_descent));
                 entry.ascent = @trunc(ascender); // cheat the ascent a bit, must be integer
