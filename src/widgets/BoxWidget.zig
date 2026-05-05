@@ -24,6 +24,9 @@ pub const InitOptions = struct {
     /// Override box's count from last frame.  Use when you are changing
     /// children's .expand in the box direction at some breakpoint.
     num_packed_expanded: ?u32 = null,
+
+    /// Space (in logical pixels) inserted between consecutive packed children.
+    gap: f32 = 0,
 };
 
 const Data = struct {
@@ -63,11 +66,12 @@ pub fn init(self: *BoxWidget, src: std.builtin.SourceLocation, init_options: Ini
     self.child_rect = self.data().contentRect().justSize();
 
     if (self.data_prev) |dp| {
+        const total_gap = if (dp.packed_children > 1) self.init_opts.gap * (dp.packed_children - 1) else 0;
         if (self.init_opts.equal_space) {
             if (dp.packed_children > 0) {
                 switch (self.init_opts.dir) {
-                    .horizontal => self.pixels_per_w = self.child_rect.w / dp.packed_children,
-                    .vertical => self.pixels_per_w = self.child_rect.h / dp.packed_children,
+                    .horizontal => self.pixels_per_w = (self.child_rect.w - total_gap) / dp.packed_children,
+                    .vertical => self.pixels_per_w = (self.child_rect.h - total_gap) / dp.packed_children,
                 }
             }
         } else {
@@ -78,8 +82,8 @@ pub fn init(self: *BoxWidget, src: std.builtin.SourceLocation, init_options: Ini
 
             if (packed_weight > 0) {
                 switch (self.init_opts.dir) {
-                    .horizontal => self.pixels_per_w = @max(0, self.child_rect.w - dp.min_space_taken) / packed_weight,
-                    .vertical => self.pixels_per_w = @max(0, self.child_rect.h - dp.min_space_taken) / packed_weight,
+                    .horizontal => self.pixels_per_w = @max(0, self.child_rect.w - dp.min_space_taken - total_gap) / packed_weight,
+                    .vertical => self.pixels_per_w = @max(0, self.child_rect.h - dp.min_space_taken - total_gap) / packed_weight,
                 }
             }
         }
@@ -206,19 +210,22 @@ pub fn rectFor(self: *BoxWidget, id: dvui.Id, min_size: Size, e: Options.Expand,
 }
 
 fn removeSpace(self: *BoxWidget, r: Rect, g: Options.Gravity) void {
+    const gap = self.init_opts.gap;
     if (self.init_opts.dir == .horizontal) {
+        const remove = r.w + gap;
         if (g.x <= 0.5) {
-            self.child_rect.w = @max(0, self.child_rect.w - r.w);
-            self.child_rect.x += r.w;
+            self.child_rect.w = @max(0, self.child_rect.w - remove);
+            self.child_rect.x += remove;
         } else {
-            self.child_rect.w = @max(0, self.child_rect.w - r.w);
+            self.child_rect.w = @max(0, self.child_rect.w - remove);
         }
     } else if (self.init_opts.dir == .vertical) {
+        const remove = r.h + gap;
         if (g.y <= 0.5) {
-            self.child_rect.h = @max(0, self.child_rect.h - r.h);
-            self.child_rect.y += r.h;
+            self.child_rect.h = @max(0, self.child_rect.h - remove);
+            self.child_rect.y += remove;
         } else {
-            self.child_rect.h = @max(0, self.child_rect.h - r.h);
+            self.child_rect.h = @max(0, self.child_rect.h - remove);
         }
     }
 }
@@ -252,17 +259,18 @@ pub fn deinit(self: *BoxWidget) void {
     defer if (dvui.widgetIsAllocated(self)) dvui.widgetFree(self);
     defer self.* = undefined;
     const extra_space = (if (self.init_opts.dir == .horizontal) self.child_rect.w else self.child_rect.h) > 0.001;
+    const total_gap = if (self.packed_children > 1) self.init_opts.gap * (self.packed_children - 1) else 0;
     const ms: Size = if (self.init_opts.dir == .horizontal) .{
-        .w = if (self.init_opts.equal_space)
+        .w = (if (self.init_opts.equal_space)
             self.max_space * self.packed_children
         else
-            self.min_space_taken,
+            self.min_space_taken) + total_gap,
         .h = self.max_thick,
     } else .{
-        .h = if (self.init_opts.equal_space)
+        .h = (if (self.init_opts.equal_space)
             self.max_space * self.packed_children
         else
-            self.min_space_taken,
+            self.min_space_taken) + total_gap,
         .w = self.max_thick,
     };
 
