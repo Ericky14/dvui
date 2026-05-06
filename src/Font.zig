@@ -37,6 +37,9 @@ pub fn string(s: *const [NAME_MAX_LEN:0]u8) [:0]const u8 {
 
 pub const Weight = enum {
     normal,
+    light,
+    medium,
+    semi_bold,
     bold,
 };
 
@@ -148,6 +151,9 @@ pub fn familyName(self: *const Font) []const u8 {
 pub fn name(self: *const Font, allocator: std.mem.Allocator) []const u8 {
     const weight = switch (self.weight) {
         .normal => "",
+        .light => " Light",
+        .medium => " Medium",
+        .semi_bold => " SemiBold",
         .bold => " Bold",
     };
     const style = switch (self.style) {
@@ -160,6 +166,9 @@ pub fn name(self: *const Font, allocator: std.mem.Allocator) []const u8 {
 pub fn format(self: *const Font, writer: *std.Io.Writer) !void {
     const weight = switch (self.weight) {
         .normal => "",
+        .light => " Light",
+        .medium => " Medium",
+        .semi_bold => " SemiBold",
         .bold => " Bold",
     };
     const style = switch (self.style) {
@@ -204,6 +213,9 @@ pub const Source = struct {
     pub fn name(self: *const Source, allocator: std.mem.Allocator) []const u8 {
         const weight = switch (self.weight) {
             .normal => "",
+            .light => " Light",
+            .medium => " Medium",
+            .semi_bold => " SemiBold",
             .bold => " Bold",
         };
         const style = switch (self.style) {

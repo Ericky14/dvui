@@ -548,6 +548,10 @@ pub fn addFont(name: []const u8, ttf_bytes: []const u8, ttf_bytes_allocator: ?st
     try currentWindow().addFont(name, ttf_bytes, ttf_bytes_allocator);
 }
 
+pub fn addFontWithWeight(name: []const u8, ttf_bytes: []const u8, weight: Font.Weight, ttf_bytes_allocator: ?std.mem.Allocator) (std.mem.Allocator.Error || FontError)!void {
+    try currentWindow().addFontWithWeight(name, ttf_bytes, weight, ttf_bytes_allocator);
+}
+
 // Get or load the underlying font at an integer size <= font.size (guaranteed to have a minimum pixel size of 1)
 pub fn fontCacheGet(font: Font) std.mem.Allocator.Error!*Font.Cache.Entry {
     const cw = currentWindow();
@@ -3963,7 +3967,7 @@ pub fn button(src: std.builtin.SourceLocation, label_str: []const u8, init_opts:
     // - gets a rectangle from bw
     // - draws itself
     // - reports its min size to bw
-    labelNoFmt(@src(), label_str, .{ .align_x = 0.5, .align_y = 0.5 }, opts.strip().override(bw.style()).override(.{ .gravity_x = 0.5, .gravity_y = 0.5 }));
+    labelNoFmt(@src(), label_str, .{ .align_x = 0.5, .align_y = 0.5 }, opts.strip().override(bw.style()).override(.{ .gravity_x = opts.gravity_x orelse 0.5, .gravity_y = opts.gravity_y orelse 0.5 }));
 
     // draw focus
     bw.drawFocus();
