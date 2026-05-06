@@ -49,6 +49,10 @@ pub fn brightness(self: @This()) f32 {
     return 0.2126 * r + 0.7152 * g + 0.0722 * b;
 }
 
+pub fn eql(self: Color, other: Color) bool {
+    return self.r == other.r and self.g == other.g and self.b == other.b and self.a == other.a;
+}
+
 pub fn toRGBA(self: @This()) [4]u8 {
     return .{ self.r, self.g, self.b, self.a };
 }
