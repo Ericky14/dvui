@@ -822,8 +822,92 @@ pub fn textureClearTarget(self: *@This(), texture: dvui.Texture.Target) void {
     self.restoreMainPass();
 }
 
-pub fn textureReadTarget(_: *@This(), _: dvui.TextureTarget, _: [*]u8) !void {
-    return error.NotImplemented;
+pub fn textureReadTarget(self: *@This(), texture: dvui.TextureTarget, pixels: [*]u8) !void {
+    const tex: wgpu.WGPUTexture = @ptrCast(texture.ptr);
+    const width = texture.width;
+    const height = texture.height;
+
+    // CopyTextureToBuffer requires bytesPerRow to be a multiple of 256.
+    const unpadded_bytes_per_row = width * 4;
+    const align_to: u32 = 256;
+    const padded_bytes_per_row = (unpadded_bytes_per_row + align_to - 1) / align_to * align_to;
+    const buffer_size: u64 = @as(u64, padded_bytes_per_row) * height;
+
+    const readback = wgpu.wgpuDeviceCreateBuffer(self.device, &wgpu.WGPUBufferDescriptor{
+        .nextInChain = null,
+        .label = .{ .data = "dvui_readback", .length = 13 },
+        .usage = wgpu.WGPUBufferUsage_MapRead | wgpu.WGPUBufferUsage_CopyDst,
+        .size = buffer_size,
+        .mappedAtCreation = 0,
+    }) orelse return error.TextureRead;
+    defer wgpu.wgpuBufferRelease(readback);
+
+    const encoder = wgpu.wgpuDeviceCreateCommandEncoder(self.device, null) orelse return error.TextureRead;
+    wgpu.wgpuCommandEncoderCopyTextureToBuffer(
+        encoder,
+        &wgpu.WGPUTexelCopyTextureInfo{
+            .texture = tex,
+            .mipLevel = 0,
+            .origin = .{ .x = 0, .y = 0, .z = 0 },
+            .aspect = wgpu.WGPUTextureAspect_All,
+        },
+        &wgpu.WGPUTexelCopyBufferInfo{
+            .layout = .{ .offset = 0, .bytesPerRow = padded_bytes_per_row, .rowsPerImage = height },
+            .buffer = readback,
+        },
+        &wgpu.WGPUExtent3D{ .width = width, .height = height, .depthOrArrayLayers = 1 },
+    );
+    const cmd = wgpu.wgpuCommandEncoderFinish(encoder, null) orelse return error.TextureRead;
+    wgpu.wgpuCommandEncoderRelease(encoder);
+    wgpu.wgpuQueueSubmit(self.queue, 1, &cmd);
+    wgpu.wgpuCommandBufferRelease(cmd);
+
+    // Map the readback buffer and block until the GPU work + callback complete.
+    const MapState = struct {
+        var status: wgpu.WGPUMapAsyncStatus = wgpu.WGPUMapAsyncStatus_Force32;
+        fn onMap(s: wgpu.WGPUMapAsyncStatus, _: wgpu.WGPUStringView, _: ?*anyopaque, _: ?*anyopaque) callconv(.c) void {
+            status = s;
+        }
+    };
+    MapState.status = wgpu.WGPUMapAsyncStatus_Force32;
+    _ = wgpu.wgpuBufferMapAsync(readback, wgpu.WGPUMapMode_Read, 0, buffer_size, .{
+        .nextInChain = null,
+        .mode = wgpu.WGPUCallbackMode_AllowProcessEvents,
+        .callback = MapState.onMap,
+        .userdata1 = null,
+        .userdata2 = null,
+    });
+    while (MapState.status == wgpu.WGPUMapAsyncStatus_Force32) {
+        _ = wgpu.wgpuDevicePoll(self.device, 1, null);
+    }
+    if (MapState.status != wgpu.WGPUMapAsyncStatus_Success) return error.TextureRead;
+
+    const mapped: [*]const u8 = @ptrCast(wgpu.wgpuBufferGetMappedRange(readback, 0, buffer_size) orelse {
+        wgpu.wgpuBufferUnmap(readback);
+        return error.TextureRead;
+    });
+    defer wgpu.wgpuBufferUnmap(readback);
+
+    // Copy row by row, stripping the 256-byte row padding. dvui expects RGBA;
+    // if the surface is BGRA, swizzle R<->B.
+    const swap_rb = self.surface_format == wgpu.WGPUTextureFormat_BGRA8Unorm or
+        self.surface_format == wgpu.WGPUTextureFormat_BGRA8UnormSrgb;
+    var row: u32 = 0;
+    while (row < height) : (row += 1) {
+        const src = mapped + row * padded_bytes_per_row;
+        const dst = pixels + row * unpadded_bytes_per_row;
+        if (swap_rb) {
+            var i: u32 = 0;
+            while (i < unpadded_bytes_per_row) : (i += 4) {
+                dst[i + 0] = src[i + 2];
+                dst[i + 1] = src[i + 1];
+                dst[i + 2] = src[i + 0];
+                dst[i + 3] = src[i + 3];
+            }
+        } else {
+            @memcpy(dst[0..unpadded_bytes_per_row], src[0..unpadded_bytes_per_row]);
+        }
+    }
 }
 
 pub fn renderTarget(self: *@This(), maybe_target: ?dvui.TextureTarget) void {

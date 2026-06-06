@@ -335,7 +335,12 @@ pub fn buildBackend(backend: Backend, test_dvui_and_app: bool, dvui_opts_in: Dvu
             }
         },
         .testing => {
-            dvui_opts.setDefaults(.{ .libc = true, .freetype = true, .tiny_file_dialogs = true, .stb_image = true, .tree_sitter = true });
+            // tree-sitter and tiny-file-dialogs C bindings aren't generated for the
+            // testing backend, so defaulting them on makes `zig build test
+            // -Dbackend=testing` fail to compile (missing dvui.c.TSLanguage /
+            // tinyfd_* symbols). The headless testing backend needs neither —
+            // default them off so the test harness actually builds.
+            dvui_opts.setDefaults(.{ .libc = true, .freetype = true, .tiny_file_dialogs = false, .stb_image = true, .tree_sitter = false });
             const testing_mod = b.addModule("testing", .{
                 .root_source_file = b.path("src/backends/testing.zig"),
                 .target = target,

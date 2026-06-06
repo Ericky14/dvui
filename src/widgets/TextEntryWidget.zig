@@ -667,8 +667,12 @@ pub fn drawCursor(self: *TextEntryWidget) void {
         const phase = @divFloor(elapsed, blink_interval_ns);
         const visible = @rem(phase, 2) == 0;
 
-        // Request continuous redraws while focused so the blink animates
-        dvui.refresh(null, @src(), self.data().id);
+        // Schedule a redraw at the next blink toggle rather than refreshing
+        // every frame. A per-frame refresh makes a focused text entry busy-redraw
+        // at max FPS (and prevents dvui.testing.settle from ever settling); a
+        // timer animates the blink while staying idle between toggles.
+        const ns_to_toggle = blink_interval_ns - @rem(elapsed, blink_interval_ns);
+        dvui.timer(self.data().id, @intCast(@divFloor(ns_to_toggle, std.time.ns_per_us)));
 
         if (visible) {
             // the cursor can be slightly outside the textLayout clip

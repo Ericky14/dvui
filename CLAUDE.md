@@ -18,27 +18,62 @@ GPU SDF rounded-rect pipeline, `BoxWidget` gap support, and more. When changing
 shared widgets, assume downstream (`dvui-ds`, `src/editor`) depends on current
 behavior — check before altering public APIs or visuals.
 
-## Build & test — IMPORTANT
+## Build & test
 
-**Do not trust `zig build test` in this directory.** The standalone dvui build
-compiles *every* backend (sdl3, sdl3gpu, raylib, web, wio, dx11) and example
-target; in this environment several fail for reasons unrelated to your change
-(`sdl3gpu.zig` uses `@cImport`, raylib needs system libs, the testing-backend
-target references tree-sitter/tinyfd C bindings that aren't generated under
-`-Dbackend=testing`).
+**Plain `zig build test` (no `-Dbackend`) compiles *every* backend** (sdl3,
+sdl3gpu, raylib, web, wio, dx11) and example target; some fail here for reasons
+unrelated to your change (`sdl3gpu.zig` uses `@cImport`, raylib needs system
+libs). Always pin a backend.
 
-dvui is actually consumed through the **dvui-ds** package, which compiles the
-dvui module with a known-good config (`backend=custom`, `render-backend=wgpu`,
-`freetype=true`, `tree-sitter=false`, `tiny-file-dialogs=false`). To compile-check
-a change to a dvui widget, build through dvui-ds:
+Two reliable ways to test:
 
 ```bash
-cd ../..            # vendor/dvui-ds
-zig build test      # compiles the dvui module (incl. your widget) + ds tests — verified green
-zig build example   # storybook, to see widgets render
+# Headless logic + screenshot tests (CPU, no GPU/window). Fast and green.
+zig build test -Dbackend=testing
+zig build test -Dbackend=testing -Dtest-filter="<name>"
+
+# Compile-check a widget against the real config the engine uses, via dvui-ds:
+cd ../.. && zig build test      # dvui module + ds tests — verified green
+cd ../.. && zig build example   # storybook, to see widgets render on the GPU
 ```
 
 The whole engine (`zigame` at the repo root) is a third consumer.
+
+## Headless screenshot / visual tests
+
+The **testing backend rasterizes on the CPU** (`src/backends/testing.zig`), so
+`dvui.testing` can produce real PNGs with no GPU or window — deterministic and
+CI-friendly. Screen draws stay no-op (logic tests stay fast); only rendering into
+a render *target* (which `Picture`/`capturePng`/`saveImage`/snapshot images use)
+rasterizes.
+
+```zig
+test "my widget renders" {
+    var t = try dvui.testing.init(.{ .window_size = .{ .w = 200, .h = 80 } });
+    defer t.deinit();
+    const Local = struct {
+        fn frame() !dvui.App.Result {
+            _ = dvui.button(@src(), "Save", .{}, .{ .corner_radius = dvui.Rect.all(6) });
+            return .ok;
+        }
+    };
+    try dvui.testing.settle(Local.frame);
+    try t.saveImage(Local.frame, null, "save_button.png"); // writes when -Dimage-dir is set
+}
+```
+
+```bash
+zig build test -Dbackend=testing -Dimage-dir=/tmp/shots -Dtest-filter="my widget renders"
+```
+
+`saveImage` is a no-op unless `-Dimage-dir` is given, so these tests stay cheap in
+normal runs. See the example tests at the bottom of `src/backends/testing.zig`.
+
+**Gotcha:** render components at a real size. `renderText` early-returns when its
+clipped rect is empty, so a widget given `min_size_content = .{ .w = N }` (height
+defaults to 0!) collapses its content area and its text won't appear. Pass a
+height (or let the font set it) — e.g. `.{ .w = 150, .h = 18 }`. Labels, buttons,
+panels, icons, scrolled content, and text entries all capture correctly when sized.
 
 ## Immediate-mode model (orientation)
 
