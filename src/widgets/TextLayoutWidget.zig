@@ -1033,8 +1033,19 @@ fn cursorSeen(self: *TextLayoutWidget) void {
     }
 
     if (self.scroll_to_cursor) {
+        // The caret rect's bottom can extend past the content (the layout
+        // under-counts the last line's height vs the font's full ascent+descent).
+        // Scrolling to reveal that overshoots the content bottom and then clamps
+        // back, bouncing the scroll up/down every frame when the caret is on the
+        // last line. Clamp the rect to the content height so the scroll target
+        // stays in range.
+        var scroll_cr = cr;
+        const content_h = self.data().contentRect().h;
+        if (content_h > 0 and scroll_cr.y + scroll_cr.h > content_h) {
+            scroll_cr.h = @max(0, content_h - scroll_cr.y);
+        }
         dvui.scrollTo(.{
-            .screen_rect = self.screenRectScale(cr.outset(self.data().options.paddingGet())).r,
+            .screen_rect = self.screenRectScale(scroll_cr.outset(self.data().options.paddingGet())).r,
             // cursor might just have transitioned to a new line, so scroll area has not expanded yet
             .over_scroll = true,
         });
