@@ -164,6 +164,8 @@ pub const InitOptions = struct {
     tree_sitter: ?TreeSitterOption = null,
     /// Faded text shown when the textEntry is empty
     placeholder: ?[]const u8 = null,
+    /// Optional explicit placeholder color. When null, uses text color at 65% opacity.
+    placeholder_color: ?dvui.Color = null,
 
     /// If true, assume text (and text height) is the same (excepting edits we
     /// do internally) as we saw last frame and only process what is needed for
@@ -180,6 +182,9 @@ pub const InitOptions = struct {
     // must be a single utf8 character
     password_char: ?[]const u8 = null,
     multiline: bool = false,
+    /// When false, suppresses the default 2px focus border ring.
+    /// Useful when the consumer handles focus styling (e.g. changing border color).
+    focus_border: bool = true,
 };
 
 wd: WidgetData,
@@ -423,7 +428,12 @@ pub fn draw(self: *TextEntryWidget) void {
                 // prevent textLayout from making a text run for the placeholder text
                 dvui.currentWindow().accesskit.text_run_parent = null;
             }
-            self.textLayout.addText(placeholder, .{ .color_text = self.textLayout.data().options.color(.text).opacity(0.65) });
+            // Prevent click/selection logic from resolving against placeholder text —
+            // otherwise cursor_rect lands mid-placeholder for one frame before jumping to start.
+            const saved_sel_move = self.textLayout.sel_move;
+            self.textLayout.sel_move = .none;
+            self.textLayout.addText(placeholder, .{ .color_text = self.init_opts.placeholder_color orelse self.textLayout.data().options.color(.text).opacity(0.65) });
+            self.textLayout.sel_move = saved_sel_move;
         }
     }
 
@@ -634,7 +644,7 @@ pub fn drawAfterText(self: *TextEntryWidget) void {
 
     dvui.clipSet(self.prevClip);
 
-    if (focused) {
+    if (focused and self.init_opts.focus_border) {
         self.data().focusBorder();
     }
 }
@@ -642,12 +652,37 @@ pub fn drawAfterText(self: *TextEntryWidget) void {
 pub fn drawCursor(self: *TextEntryWidget) void {
     var sel = self.textLayout.selectionGet(self.len);
     if (sel.empty()) {
-        // the cursor can be slightly outside the textLayout clip
-        dvui.clipSet(self.scrollClip);
+        // Blink: 500ms on / 500ms off, reset on interaction
+        const blink_interval_ns: i128 = 500_000_000;
+        const now = dvui.frameTimeNS();
+        const last_interaction = dvui.dataGetPtrDefault(null, self.data().id, "_blink", i128, now);
+        const elapsed = now - last_interaction.*;
+        const phase = @divFloor(elapsed, blink_interval_ns);
+        const visible = @rem(phase, 2) == 0;
 
-        var crect = self.textLayout.cursor_rect.plus(.{ .x = -1 });
-        crect.w = 2;
-        self.textLayout.screenRectScale(crect).r.fill(.{}, .{ .color = dvui.themeGet().focus, .fade = 1.0 });
+        // Request continuous redraws while focused so the blink animates
+        dvui.refresh(null, @src(), self.data().id);
+
+        if (visible) {
+            // the cursor can be slightly outside the textLayout clip
+            dvui.clipSet(self.scrollClip);
+
+            var crect = self.textLayout.cursor_rect;
+            crect.w = 1;
+
+            // For single-line inputs, clamp cursor height to text layout content
+            // area so it doesn't overflow past the padding. The font's full
+            // ascent+descent can exceed the layout's content height.
+            if (!self.init_opts.multiline) {
+                const tl_h = self.textLayout.data().contentRect().h;
+                if (crect.h > tl_h and tl_h > 0) {
+                    crect.y += (crect.h - tl_h) / 2;
+                    crect.h = tl_h;
+                }
+            }
+
+            self.textLayout.screenRectScale(crect).r.fill(.{}, .{ .color = dvui.themeGet().focus, .fade = 1.0 });
+        }
     }
 }
 
@@ -1269,6 +1304,12 @@ pub fn processEvent(self: *TextEntryWidget, e: *Event) void {
                 },
             }
         }
+    }
+
+    // Reset cursor blink on any handled interaction so it's immediately visible
+    if (e.handled) {
+        const blink = dvui.dataGetPtrDefault(null, self.data().id, "_blink", i128, dvui.frameTimeNS());
+        blink.* = dvui.frameTimeNS();
     }
 }
 
