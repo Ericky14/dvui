@@ -688,7 +688,20 @@ pub fn drawCursor(self: *TextEntryWidget) void {
                 }
             }
 
-            self.textLayout.screenRectScale(crect).r.fill(.{}, .{ .color = dvui.themeGet().focus, .fade = 1.0 });
+            var cursor_rs = self.textLayout.screenRectScale(crect).r;
+
+            // Keep the caret inside the visible padded text area. Typing at the
+            // end advances the caret this frame, but the text only scrolls to
+            // follow it next frame; without clamping, the caret renders one frame
+            // out in the padding/border and then snaps back. Pin it to the edge
+            // of the text area instead. When the text is already scrolled to the
+            // caret this is a no-op, so settled rendering is unaffected.
+            const pad_scale = self.data().rectScale().s;
+            const text_area = self.textClip.inset(self.padding.scale(pad_scale, Rect.Physical));
+            cursor_rs.x = std.math.clamp(cursor_rs.x, text_area.x, @max(text_area.x, text_area.x + text_area.w - cursor_rs.w));
+            cursor_rs.y = std.math.clamp(cursor_rs.y, text_area.y, @max(text_area.y, text_area.y + text_area.h - cursor_rs.h));
+
+            cursor_rs.fill(.{}, .{ .color = dvui.themeGet().focus, .fade = 1.0 });
         }
     }
 }
