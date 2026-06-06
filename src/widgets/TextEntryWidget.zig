@@ -415,6 +415,11 @@ pub fn processEvents(self: *TextEntryWidget) void {
 }
 
 pub fn draw(self: *TextEntryWidget) void {
+    if (self.data().id != dvui.focusedWidgetId()) {
+        self.textLayout.selection.start = self.textLayout.selection.cursor;
+        self.textLayout.selection.end = self.textLayout.selection.cursor;
+    }
+
     self.drawBeforeText();
 
     if (self.len == 0) {
@@ -624,8 +629,10 @@ pub fn drawBeforeText(self: *TextEntryWidget) void {
         dvui.wantTextInput(self.data().borderRectScale().r.toNatural());
     }
 
-    // set clip back to what textLayout had, so we don't draw over the scrollbars
-    dvui.clipSet(self.textClip);
+    // Set clip back to what textLayout had, so we don't draw over the
+    // scrollbars, but inset by our padding.
+    const text_clip_scale = self.data().rectScale().s;
+    dvui.clipSet(self.textClip.inset(self.padding.scale(text_clip_scale, Rect.Physical)));
 
     if (self.init_opts.cache_layout) {
         self.textLayout.cache_layout_bytes = self.textLayout.bytesNeeded(
