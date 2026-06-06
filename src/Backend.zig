@@ -111,7 +111,7 @@ fn drawSdfRectFallback(self: Backend, sdf_rect: dvui.SdfRect, clipr: ?dvui.Rect.
         var path: dvui.Path.Builder = .init(dvui.currentWindow().lifo());
         defer path.deinit();
         path.addRect(rect, sdf_rect.radii);
-        path.build().fillConvex(.{ .color = sdf_rect.fill_color, .fade = 1.0 });
+        path.build().fillConvex(.{ .color = sdf_rect.fill_color, .fade = @max(1.0, sdf_rect.softness) });
     }
     if (sdf_rect.border_width > 0 and sdf_rect.border_color.a > 0) {
         var path: dvui.Path.Builder = .init(dvui.currentWindow().lifo());

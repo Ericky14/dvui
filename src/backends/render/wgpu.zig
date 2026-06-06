@@ -599,7 +599,7 @@ pub fn drawSdfRect(self: *@This(), sdf_rect: dvui.SdfRect, clipr: ?dvui.Rect.Phy
             @as(f32, @floatFromInt(border_pma.b)) / 255.0,
             @as(f32, @floatFromInt(border_pma.a)) / 255.0,
         },
-        .border_softness = .{ sdf_rect.border_width, 1.0 },
+        .border_softness = .{ sdf_rect.border_width, sdf_rect.softness },
     };
 
     const inst_bytes: u64 = @sizeOf(SdfInstanceData);

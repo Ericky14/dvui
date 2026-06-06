@@ -185,7 +185,12 @@ pub fn dropped(self: *DropdownWidget) bool {
                         dvui.dataSet(null, drop.data().id, "_eat_mouse_up", eat_mouse_up);
                     }
                 } else if (e.evt.mouse.action == .motion or (e.evt.mouse.action == .press and e.evt.mouse.button.pointer())) {
-                    if (eat_mouse_up) {
+                    // Only a fresh press (clicking an item) arms selection on the
+                    // following release. Plain motion must NOT — otherwise moving
+                    // the mouse after the opening click makes that click's release
+                    // select+close, so the menu only stays open while held. This
+                    // keeps it click-to-open / click-to-select.
+                    if (e.evt.mouse.action == .press and eat_mouse_up) {
                         eat_mouse_up = false;
                         dvui.dataSet(null, drop.data().id, "_eat_mouse_up", eat_mouse_up);
                     }

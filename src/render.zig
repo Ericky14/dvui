@@ -41,6 +41,9 @@ pub const SdfRect = struct {
     border_color: Color,
     /// Border width in physical pixels
     border_width: f32,
+    /// Edge transition width in physical pixels. ~1 gives a crisp anti-aliased
+    /// edge; larger values produce a soft falloff (used for drop shadows / blur).
+    softness: f32 = 1.0,
 };
 
 /// Represents a deferred call to one of the render functions.  This is how

@@ -236,6 +236,7 @@ pub fn RectType(comptime units: dvui.enums.Units) type {
                     .fill_color = dvui.Color{ .r = 0, .g = 0, .b = 0, .a = 0 },
                     .border_color = opts.color,
                     .border_width = opts.thickness,
+                    .softness = 1.0,
                 }) catch |err| {
                     dvui.log.err("SDF stroke error: {}", .{err});
                 };
@@ -268,6 +269,9 @@ pub fn RectType(comptime units: dvui.enums.Units) type {
                     .fill_color = opts.color,
                     .border_color = dvui.Color{ .r = 0, .g = 0, .b = 0, .a = 0 },
                     .border_width = 0,
+                    // `fade` carries the edge softness: ~1 for normal AA, larger
+                    // for soft drop shadows.
+                    .softness = @max(1.0, opts.fade),
                 }) catch |err| {
                     dvui.log.err("SDF fill error: {}", .{err});
                 };

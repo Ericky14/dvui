@@ -49,8 +49,9 @@ fn vs_main(@builtin(vertex_index) vi: u32, instance: InstanceInput) -> VertexOut
         default: { corner = vec2<f32>(1.0, 1.0); }
     }
 
-    // Expand quad by 1px on each side for AA bleeding
-    let aa_pad = 1.0;
+    // Expand the quad to cover the AA edge plus any soft-shadow falloff
+    // (border_softness.y is the edge transition width in pixels).
+    let aa_pad = max(1.0, instance.border_softness.y * 0.5 + 1.0);
     let padded_pos = instance.rect_pos - vec2<f32>(aa_pad);
     let padded_size = instance.rect_size + vec2<f32>(aa_pad * 2.0);
 
@@ -90,6 +91,11 @@ fn sdf_rounded_rect(p: vec2<f32>, half_size: vec2<f32>, radii: vec4<f32>) -> f32
         }
     }
 
+    // Clamp the corner radius to half the smaller dimension. Callers use a huge
+    // radius (e.g. 1000) to mean "fully rounded" (circle/pill); without this the
+    // SDF is positive everywhere and the shape vanishes.
+    r = min(r, min(half_size.x, half_size.y));
+
     let q = abs(p) - half_size + vec2<f32>(r);
     return min(max(q.x, q.y), 0.0) + length(max(q, vec2<f32>(0.0))) - r;
 }
@@ -100,19 +106,15 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let dist = sdf_rounded_rect(in.local_pos, half_size, in.radii);
 
     let border_width = in.border_softness.x;
-    // AA softness: 1 pixel edge
-    let softness = 1.0;
+    // Edge transition width in pixels: ~1 for crisp anti-aliasing, larger for a
+    // soft drop-shadow falloff. Coverage-style AA (clamp(0.5 - dist/aa)) keeps
+    // thin 1px borders fully opaque and renders identically on every edge.
+    let aa = max(1.0, in.border_softness.y);
 
     if (border_width > 0.0) {
-        // Outer edge alpha (fill + border region)
-        let outer_alpha = 1.0 - smoothstep(-softness, 0.0, dist);
-        // Inner edge (inside border)
-        let inner_dist = dist + border_width;
-        let inner_alpha = 1.0 - smoothstep(-softness, 0.0, inner_dist);
-
-        // Border is the region between outer and inner
+        let outer_alpha = clamp(0.5 - dist / aa, 0.0, 1.0);
+        let inner_alpha = clamp(0.5 - (dist + border_width) / aa, 0.0, 1.0);
         let border_region = outer_alpha - inner_alpha;
-        // Fill is the inner region
         let fill_region = inner_alpha;
 
         let color = in.fill_color * fill_region + in.border_color * border_region;
@@ -121,8 +123,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         }
         return color;
     } else {
-        // No border — just filled rounded rect
-        let alpha = 1.0 - smoothstep(-softness, 0.0, dist);
+        let alpha = clamp(0.5 - dist / aa, 0.0, 1.0);
         let color = in.fill_color * alpha;
         if (color.a < 0.001) {
             discard;
