@@ -121,17 +121,17 @@ pub fn main(init: std.process.Init) !void {
     try decl_patterns.put(gpa, .ignore, .init(&.{"enum_accesskit_"}));
 
     // Go through each pattern in order and collect any decls that match
-    for (std.meta.declarations(c)) |decl| {
-        if (std.mem.containsAtLeast(u8, decl.name, 1, "accesskit") or
-            std.mem.containsAtLeast(u8, decl.name, 1, "ACCESSKIT"))
+    for (std.meta.declarations(c)) |decl_name| {
+        if (std.mem.containsAtLeast(u8, decl_name, 1, "accesskit") or
+            std.mem.containsAtLeast(u8, decl_name, 1, "ACCESSKIT"))
         {
             searching: {
                 for (&pattern_order) |group_type| {
                     const entry = decl_patterns.getEntry(group_type) orelse unreachable;
 
                     for (entry.value_ptr.patterns) |pattern| {
-                        if (std.mem.containsAtLeast(u8, decl.name, 1, pattern)) {
-                            try entry.value_ptr.matches.append(gpa, .{ .pattern = pattern, .decl = decl.name });
+                        if (std.mem.containsAtLeast(u8, decl_name, 1, pattern)) {
+                            try entry.value_ptr.matches.append(gpa, .{ .pattern = pattern, .decl = decl_name });
                             break :searching; // Only matches first pattern. Put more specific patterns first.
                         }
                     }

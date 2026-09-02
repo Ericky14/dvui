@@ -243,13 +243,17 @@ pub fn build(b: *std.Build) !void {
         "snapshot_image_suffix",
         b.option([]const u8, "snapshot-images", "When this name is defined, dvui.testing.snapshot will save an image ending with the string provided"),
     );
+    // Zig master resolves the install prefix in the make phase, so there is no
+    // configure-time `getInstallPath`.  `-Dgenerate-images` publishes the docs
+    // directory as a make-time path option that `dvui.testing` prefers over
+    // `image_dir`.
+    if (generate_doc_images) {
+        build_options.addOptionPath("docs_image_dir", b.graph.path(.install_prefix, "docs"));
+    }
     build_options.addOption(
         ?[]const u8,
         "image_dir",
-        if (generate_doc_images)
-            b.getInstallPath(.prefix, "docs")
-        else
-            b.option([]const u8, "image-dir", "Default directory for dvui.testing.saveImage"),
+        b.option([]const u8, "image-dir", "Default directory for dvui.testing.saveImage"),
     );
     build_options.addOption(
         ?u8,
@@ -286,7 +290,7 @@ pub fn build(b: *std.Build) !void {
         accesskit,
     );
 
-    var dvui_opts = DvuiModuleOptions{
+    const dvui_opts = DvuiModuleOptions{
         .b = b,
         .target = target,
         .optimize = optimize,
@@ -321,23 +325,23 @@ pub fn build(b: *std.Build) !void {
         .root_module = b.createModule(.{
             .root_source_file = b.path("tools/serve_web_demo.zig"),
             .target = b.graph.host,
-            .optimize = .ReleaseFast,
+            .optimize = .fast,
         }),
     });
 
     if (back_to_build) |backend| {
         try buildBackend(backend, true, dvui_opts, web_serve_exe);
     } else {
-        for (std.meta.tags(Backend)) |backend| {
-            switch (backend) {
-                .custom, .sdl => continue,
-                .web, .testing, .proxy => dvui_opts.accesskit = .off,
-                else => {},
-            }
-            // if we are building all the backends, here's where we do dvui tests
-            const test_dvui_and_app = backend == .sdl3;
-            try buildBackend(backend, test_dvui_and_app, dvui_opts, web_serve_exe);
-        }
+        // Zig master: several backend dependencies (SDL2, opengl, raylib, ...)
+        // still ship build scripts that do not compile, and any lazy dependency
+        // that has been fetched is compiled into every later configure -- even
+        // `-Dbackend=testing`.  Upstream loops over std.meta.tags(Backend) here;
+        // on master that would fetch those packages and poison the package
+        // cache, so refuse the all-backends build instead.
+        const fail = b.addFail("dvui on Zig master: build one backend at a time with -Dbackend=<name>; the all-backends build would fetch dependencies whose build.zig does not compile on Zig master yet");
+        b.getInstallStep().dependOn(&fail.step);
+        test_step.dependOn(&fail.step);
+        check_step.dependOn(&fail.step);
     }
 
     // Docs
@@ -629,7 +633,7 @@ pub fn buildBackend(
                 .target = target,
                 .optimize = optimize,
             });
-            const sdl_mod = b.addModule("sdl3", .{
+            const sdl_mod = b.addModule("sdl3gpu", .{
                 .root_source_file = b.path("src/backends/sdl3gpu.zig"),
                 .target = target,
                 .optimize = optimize,
@@ -1101,6 +1105,8 @@ pub fn buildBackend(
                     .backend_name = "web-backend",
                     .backend_mod = web_mod_wasm,
                 };
+                // Named once for the package: master panics on a duplicate named LazyPath.
+                b.addNamedLazyPath("web.js", b.path("src/backends/web.js"));
                 addWebExample("web-test", b.path("examples/web-test.zig"), example_opts, wasm_dvui_opts, web_serve_exe);
                 addWebExample("web-app", b.path("examples/app.zig"), example_opts, wasm_dvui_opts, web_serve_exe);
             }
@@ -1222,7 +1228,7 @@ pub fn linkBackend(dvui_mod: *std.Build.Module, backend_mod: *std.Build.Module) 
 const DvuiModuleOptions = struct {
     b: *std.Build,
     target: std.Build.ResolvedTarget,
-    optimize: std.builtin.OptimizeMode,
+    optimize: std.builtin.Optimize,
     check_step: ?*std.Build.Step = null,
     test_step: ?*std.Build.Step = null,
     test_filters: []const []const u8,
@@ -1413,7 +1419,7 @@ pub fn addDvuiModule(
         }
     }
 
-    const renderer_mod = b.addModule("render_backend", .{
+    const renderer_mod = b.createModule(.{
         .target = target,
         .optimize = optimize,
     });
@@ -1618,7 +1624,7 @@ fn addExample(
         if (!std.mem.eql(u8, example_opts.backend_name, "wio-backend")) {
             exe.win32_manifest = b.path("./src/main.manifest");
         }
-        exe.subsystem = .Windows;
+        exe.subsystem = .windows;
 
         if (opts.accesskit.enabled()) {
             mod.linkSystemLibrary("ws2_32", .{});
@@ -1642,7 +1648,7 @@ fn addExample(
 
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(compile_step);
-    if (b.args) |args| run_cmd.addArgs(args);
+    run_cmd.addPassthruArgs();
 
     if (opts.accesskit.enabled() and !accessKitSupported(opts.target)) {
         compile_step.dependOn(&b.addFail("Accesskit is not supported for this target. Build with -Daccesskit=off").step);
@@ -1682,7 +1688,7 @@ fn addWebExample(
             .target = opts.target,
             .optimize = opts.optimize,
             .link_libc = false,
-            .strip = if (opts.optimize == .ReleaseFast or opts.optimize == .ReleaseSmall) true else false,
+            .strip = if (opts.optimize == .fast or opts.optimize == .small) true else false,
         }),
     };
     const web_test = b.addExecutable(exeOptions);
@@ -1721,7 +1727,6 @@ fn addWebExample(
     compile_step.dependOn(&b.addInstallFileWithDir(output, install_dir, "index.html").step);
     const web_js = b.path("src/backends/web.js");
     compile_step.dependOn(&b.addInstallFileWithDir(web_js, install_dir, "web.js").step);
-    b.addNamedLazyPath("web.js", web_js);
     compile_step.dependOn(&install_wasm.step);
     compile_step.dependOn(&install_noto.step);
 
@@ -1757,7 +1762,7 @@ fn addWebExample(
 /// ```
 pub fn svgPathToTvgPath(b: *std.Build, svg_path: std.Build.LazyPath) std.Build.LazyPath {
     // use fast and native options since this is just for building
-    const optimize: std.builtin.OptimizeMode = .ReleaseFast;
+    const optimize: std.builtin.Optimize = .fast;
     const target: std.Build.ResolvedTarget = b.graph.host;
     const svg2tvg_dep = b.lazyDependency("svg2tvg", .{ .optimize = optimize, .target = target }).?;
     const svg2tvg_exe = b.addExecutable(.{

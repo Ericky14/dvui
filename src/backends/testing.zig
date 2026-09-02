@@ -344,10 +344,10 @@ test "cpu raster capture" {
             var outer = dvui.box(@src(), .{}, .{
                 .expand = .both,
                 .background = true,
-                .color_fill = .{ .r = 28, .g = 30, .b = 40, .a = 255 },
+                .color_fill = .{ .color = .{ .r = 28, .g = 30, .b = 40, .a = 255 } },
             });
             defer outer.deinit();
-            dvui.label(@src(), "Hello DVUI", .{}, .{ .color_text = .{ .r = 240, .g = 240, .b = 255, .a = 255 } });
+            dvui.label(@src(), "Hello DVUI", .{}, .{ .color_text = .{ .color = .{ .r = 240, .g = 240, .b = 255, .a = 255 } } });
             _ = dvui.button(@src(), "Click me", .{}, .{ .corners = .all(6) });
             return .ok;
         }
@@ -365,7 +365,7 @@ test "capture text entry" {
     const Local = struct {
         var buffer: [256]u8 = @splat(0);
         fn frame() !dvui.App.Result {
-            var outer = dvui.box(@src(), .{}, .{ .expand = .both, .background = true, .color_fill = .{ .r = 20, .g = 22, .b = 28, .a = 255 } });
+            var outer = dvui.box(@src(), .{}, .{ .expand = .both, .background = true, .color_fill = .{ .color = .{ .r = 20, .g = 22, .b = 28, .a = 255 } } });
             defer outer.deinit();
             var entry: TextEntryWidget = undefined;
             entry.init(@src(), .{ .text = .{ .buffer = &buffer }, .focus_border = false }, .{
@@ -375,9 +375,9 @@ test "capture text entry" {
                 .border = dvui.Rect.all(2),
                 .corners = .all(8),
                 .margin = dvui.Rect.all(12),
-                .color_fill = .{ .r = 245, .g = 245, .b = 245, .a = 255 },
-                .color_border = .{ .r = 110, .g = 180, .b = 255, .a = 255 },
-                .color_text = .{ .r = 12, .g = 12, .b = 12, .a = 255 },
+                .color_fill = .{ .color = .{ .r = 245, .g = 245, .b = 245, .a = 255 } },
+                .color_border = .{ .color = .{ .r = 110, .g = 180, .b = 255, .a = 255 } },
+                .color_text = .{ .color = .{ .r = 12, .g = 12, .b = 12, .a = 255 } },
             });
             defer entry.deinit();
             entry.processEvents();

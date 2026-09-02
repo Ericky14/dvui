@@ -20,10 +20,25 @@ behavior — check before altering public APIs or visuals.
 
 ## Build & test
 
-**Plain `zig build test` (no `-Dbackend`) compiles *every* backend** (sdl3,
-sdl3gpu, raylib, web, wio, dx11) and example target; some fail here for reasons
-unrelated to your change (`sdl3gpu.zig` uses `@cImport`, raylib needs system
-libs). Always pin a backend.
+**Compiler: Zig master only.** `build.zig` targets the 2026-05 configurer/maker
+build system (`addPassthruArgs`, `std.builtin.Optimize`, make-time install
+paths) and `build.zig.zon` pins `minimum_zig_version` to the dev build it was
+ported with (`0.17.0-dev.1963`). Upstream dvui still targets Zig 0.16, so its
+`build.zig` is not a drop-in on the next re-merge.
+
+**Always pin a backend.** `zig build` / `zig build test` without `-Dbackend` is
+refused on purpose: several upstream dependencies (SDL2, opengl, raylib, ...)
+ship `build.zig` files that do not compile on master, and Zig compiles the build
+script of *every fetched* lazy dependency into every later configure — one
+all-backends run would break even `-Dbackend=testing` until those tarballs are
+deleted from the global cache (`%LOCALAPPDATA%\zig\p\`) and from `zig-pkg/`.
+`zig build --help` is safe (it fetches nothing).
+
+`svg2tvg` and its `zig-xml` dependency are vendored under `vendor/` as path
+dependencies with one-line `@splat` patches (`**` array repetition was removed
+from the language); re-point `build.zig.zon` at upstream once they build on
+master. On Windows with `core.autocrlf=true` a fresh checkout is CRLF and
+`zig fmt --check` flags every file — run `zig fmt build.zig src/` once.
 
 Two reliable ways to test:
 
@@ -95,7 +110,8 @@ panels, icons, scrolled content, and text entries all capture correctly when siz
 
 ## Conventions
 
-- Zig 0.16/0.17-dev. `zig fmt` is the linter.
+- Zig master (0.17-dev). `zig fmt` is the linter; it also applies builtin renames
+  such as `@intFromEnum` -> `@backingInt`.
 - Match upstream dvui style (it's a fork): widget-struct files, `///` doc
   comments, explicit `Options`, no hidden allocations.
 - Prefer fixing shared behavior here only when it benefits all consumers;

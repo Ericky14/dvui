@@ -167,7 +167,7 @@ pub fn renderTarget(_: *ProxyBackend, target: ?dvui.TextureTarget) !void {
 
 pub fn setCursor(_: *ProxyBackend, cursor: dvui.enums.Cursor) void {
     const b = bridgeGeneric() catch return;
-    b.set_cursor(bridgeCtx(b), @intFromEnum(cursor));
+    b.set_cursor(bridgeCtx(b), @backingInt(cursor));
 }
 
 pub fn textInputRect(_: *ProxyBackend, rect: ?dvui.Rect.Natural) void {

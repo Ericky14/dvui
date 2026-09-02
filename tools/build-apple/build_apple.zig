@@ -12,7 +12,7 @@ pub const RunSimOptions = struct {
     /// Drives both the Xcode Debug/Release configuration and the exact zig
     /// `-Doptimize=` value the project's preBuildScript uses for its `zig build lib` --
     /// single source of truth (usually `b.standardOptimizeOption(.{})`), not a separate flag.
-    optimize: std.builtin.OptimizeMode,
+    optimize: std.builtin.Optimize,
     /// If set, copy the built .app bundle here after building.
     app_bundle_out: ?[]const u8 = null,
     /// Substring to match when auto-booting a simulator if none is already booted
@@ -26,7 +26,7 @@ pub const RunSimOptions = struct {
 pub fn addRunSimStep(b: *std.Build, name: []const u8, description: []const u8, opts: RunSimOptions) *std.Build.Step {
     const run = b.addSystemCommand(&.{ "sh", "tools/build-apple/run-sim.sh" });
     run.setEnvironmentVariable("XCODE_PROJECT_DIR", opts.xcode_project_dir);
-    run.setEnvironmentVariable("CONFIGURATION", if (opts.optimize == .Debug) "Debug" else "Release");
+    run.setEnvironmentVariable("CONFIGURATION", if (opts.optimize == .debug) "Debug" else "Release");
     run.setEnvironmentVariable("ZIG_OPTIMIZE", @tagName(opts.optimize));
     if (opts.derived_data_dir) |dir| run.setEnvironmentVariable("DERIVED_DATA_DIR", dir);
     if (opts.app_bundle_out) |dir| run.setEnvironmentVariable("APP_BUNDLE_OUT", dir);

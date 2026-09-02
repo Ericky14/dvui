@@ -56,7 +56,7 @@ window_geometry: WindowGeometry = .{},
 // Set by `initWindow` and `initWindowSecondary` for use by eventual child window.
 init_opts_save: ?InitOptions = null,
 
-const cursor_enum_count = @typeInfo(dvui.enums.Cursor).@"enum".fields.len;
+const cursor_enum_count = @typeInfo(dvui.enums.Cursor).@"enum".field_names.len;
 
 pub const InitOptions = struct {
     /// Io backend and dvui should use, will be assigned to dvui.io.
@@ -751,7 +751,7 @@ pub fn setCursor(self: *SDLBackend, cursor: dvui.enums.Cursor) void {
         if (new_state == false) return;
     }
 
-    const enum_int = @intFromEnum(cursor);
+    const enum_int = @backingInt(cursor);
     const tried = self.cursor_backing_tried[enum_int];
     if (!tried) {
         self.cursor_backing_tried[enum_int] = true;
@@ -1753,16 +1753,16 @@ pub fn SDL_keymod_to_dvui(keymod: u16) dvui.enums.Mod {
     if (keymod == if (sdl3) c.SDL_KMOD_NONE else c.KMOD_NONE) return dvui.enums.Mod.none;
 
     var m: u16 = 0;
-    if (keymod & (if (sdl3) c.SDL_KMOD_LSHIFT else c.KMOD_LSHIFT) > 0) m |= @intFromEnum(dvui.enums.Mod.lshift);
-    if (keymod & (if (sdl3) c.SDL_KMOD_RSHIFT else c.KMOD_RSHIFT) > 0) m |= @intFromEnum(dvui.enums.Mod.rshift);
-    if (keymod & (if (sdl3) c.SDL_KMOD_LCTRL else c.KMOD_LCTRL) > 0) m |= @intFromEnum(dvui.enums.Mod.lcontrol);
-    if (keymod & (if (sdl3) c.SDL_KMOD_RCTRL else c.KMOD_RCTRL) > 0) m |= @intFromEnum(dvui.enums.Mod.rcontrol);
-    if (keymod & (if (sdl3) c.SDL_KMOD_LALT else c.KMOD_LALT) > 0) m |= @intFromEnum(dvui.enums.Mod.lalt);
-    if (keymod & (if (sdl3) c.SDL_KMOD_RALT else c.KMOD_RALT) > 0) m |= @intFromEnum(dvui.enums.Mod.ralt);
-    if (keymod & (if (sdl3) c.SDL_KMOD_LGUI else c.KMOD_LGUI) > 0) m |= @intFromEnum(dvui.enums.Mod.lcommand);
-    if (keymod & (if (sdl3) c.SDL_KMOD_RGUI else c.KMOD_RGUI) > 0) m |= @intFromEnum(dvui.enums.Mod.rcommand);
+    if (keymod & (if (sdl3) c.SDL_KMOD_LSHIFT else c.KMOD_LSHIFT) > 0) m |= @backingInt(dvui.enums.Mod.lshift);
+    if (keymod & (if (sdl3) c.SDL_KMOD_RSHIFT else c.KMOD_RSHIFT) > 0) m |= @backingInt(dvui.enums.Mod.rshift);
+    if (keymod & (if (sdl3) c.SDL_KMOD_LCTRL else c.KMOD_LCTRL) > 0) m |= @backingInt(dvui.enums.Mod.lcontrol);
+    if (keymod & (if (sdl3) c.SDL_KMOD_RCTRL else c.KMOD_RCTRL) > 0) m |= @backingInt(dvui.enums.Mod.rcontrol);
+    if (keymod & (if (sdl3) c.SDL_KMOD_LALT else c.KMOD_LALT) > 0) m |= @backingInt(dvui.enums.Mod.lalt);
+    if (keymod & (if (sdl3) c.SDL_KMOD_RALT else c.KMOD_RALT) > 0) m |= @backingInt(dvui.enums.Mod.ralt);
+    if (keymod & (if (sdl3) c.SDL_KMOD_LGUI else c.KMOD_LGUI) > 0) m |= @backingInt(dvui.enums.Mod.lcommand);
+    if (keymod & (if (sdl3) c.SDL_KMOD_RGUI else c.KMOD_RGUI) > 0) m |= @backingInt(dvui.enums.Mod.rcommand);
 
-    return @as(dvui.enums.Mod, @enumFromInt(m));
+    return @as(dvui.enums.Mod, @fromBackingInt(@intCast(m)));
 }
 
 pub fn SDL_keysym_to_dvui(keysym: i32) dvui.enums.Key {
@@ -2035,7 +2035,7 @@ const SdlLogPriorityType = blk: {
     const Opt = @typeInfo(c.SDL_LogOutputFunction);
     const FnPtr = if (Opt == .optional) @typeInfo(Opt.optional.child) else Opt;
     const FnT = @typeInfo(FnPtr.pointer.child).@"fn";
-    break :blk FnT.params[2].type.?;
+    break :blk FnT.param_types[2].?;
 };
 
 fn sdlLogCallback(userdata: ?*anyopaque, category: c_int, priority: SdlLogPriorityType, message: [*c]const u8) callconv(.c) void {

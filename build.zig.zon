@@ -2,7 +2,7 @@
     .name = .dvui,
     .fingerprint = 0xa35affe599490101,
     .version = "0.5.0-dev",
-    .minimum_zig_version = "0.16.0",
+    .minimum_zig_version = "0.17.0-dev.1963+e00c6c439",
     .paths = .{
         "LICENSE",
         "README.md",
@@ -77,8 +77,11 @@
         },
         // for rendering tvg icons
         .svg2tvg = .{
-            .url = "git+https://github.com/nat3Github/zig-lib-svg2tvg#2c72af8ff00621b094ca70f03440405f59511fbb",
-            .hash = "svg2tvg-0.0.0-HpMZuaP8BQALdwSolfst0dPGUUn2ptqgfSxVs8RoQJ6K",
+            // Vendored copy of nat3Github/zig-lib-svg2tvg 2c72af8 (and its zig-xml
+            // b97f2ab dependency under vendor/xml): both use `**` array repetition,
+            // which Zig master removed, so they carry one-line @splat patches.
+            // Re-point at the upstream git URL once upstream builds on master.
+            .path = "vendor/svg2tvg",
             .lazy = true,
         },
         .accesskit = .{

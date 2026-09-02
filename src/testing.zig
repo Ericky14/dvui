@@ -81,6 +81,17 @@ pub const InitOptions = struct {
     snapshot_dir: []const u8 = "snapshots",
 };
 
+/// Directory `saveImage` writes to when `InitOptions.image_dir` is null.
+///
+/// `-Dgenerate-images` publishes the docs install directory as a make-time
+/// path option (Zig master has no configure-time install path); otherwise
+/// this is `-Dimage-dir`, which may be null.
+fn defaultImageDir() ?[]const u8 {
+    const build_options = @import("build_options");
+    if (@hasDecl(build_options, "docs_image_dir")) return build_options.docs_image_dir;
+    return build_options.image_dir;
+}
+
 pub fn init(options: InitOptions) !Self {
     dvui.io = options.io;
     // init SDL backend (creates and owns OS window)
@@ -134,7 +145,7 @@ pub fn init(options: InitOptions) !Self {
         .allocator = options.allocator,
         .backend = backend,
         .window = window,
-        .image_dir = options.image_dir orelse @import("build_options").image_dir,
+        .image_dir = options.image_dir orelse defaultImageDir(),
         .snapshot_dir = options.snapshot_dir,
     };
 }
