@@ -1,0 +1,20 @@
+# Keep the working copy LF everywhere: zig fmt writes LF, and the tree was authored on
+# Linux. Without this, Windows checkouts with core.autocrlf=true flip every file to CRLF
+# and `zig fmt` then reports the whole tree as rewritten.
+* text=auto eol=lf
+*.zig text eol=lf
+*.zon text eol=lf
+*.wgsl text eol=lf
+*.md text eol=lf
+*.yml text eol=lf
+*.sh text eol=lf
+tools/zig text eol=lf
+
+# Binaries
+*.png binary
+*.ttf binary
+*.otf binary
+*.glb binary
+*.gltf text
+*.wav binary
+*.ogg binary
