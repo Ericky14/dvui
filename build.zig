@@ -1498,6 +1498,14 @@ pub fn addDvuiModule(
     const freetype = opts.freetype orelse @panic("freetype was null");
     if (freetype) {
         dvui_translate_c.defineCMacro("DVUI_USE_FREETYPE", "1");
+        // Zig master's translate-c rejects __attribute__((visibility("default"))),
+        // which FT_EXPORT expands to off Windows. Route FreeType's config include
+        // through src/dvui-ftconfig.h, which blanks the export attribute for the
+        // translation only (the library build is untouched).
+        if (target.result.os.tag != .windows) {
+            dvui_translate_c.addIncludePath(b.path("src"));
+            dvui_translate_c.defineCMacro("FT_CONFIG_CONFIG_H", "\"dvui-ftconfig.h\"");
+        }
         if (b.systemIntegrationOption("freetype", .{})) {
             dvui_translate_c.linkSystemLibrary("freetype2", .{});
             dvui_mod.linkSystemLibrary("freetype2", .{});
