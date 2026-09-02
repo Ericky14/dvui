@@ -34,7 +34,7 @@ pub fn textEntryWidgets() void {
 
             var copies_val: f32 = @floatFromInt(copies.*);
             if (dvui.sliderEntry(@src(), "copies: {d:0.0}", .{ .value = &copies_val, .min = 0, .max = 1000, .interval = 1 }, .{ .gravity_y = 0.5 })) {
-                copies.* = @intFromFloat(@round(copies_val));
+                copies.* = @round(copies_val);
                 copies_changed = true;
                 fw.autoSize();
             }
@@ -47,9 +47,6 @@ pub fn textEntryWidgets() void {
 
             _ = dvui.checkbox(@src(), break_lines, "Break Lines", .{ .gravity_y = 0.5 });
         }
-
-        var scroll = dvui.scrollArea(@src(), .{}, .{ .expand = .both });
-        defer scroll.deinit();
 
         var tl: dvui.TextEntryWidget = undefined;
         tl.init(@src(), .{ .multiline = true, .cache_layout = true, .break_lines = break_lines.*, .scroll_horizontal = !break_lines.*, .text = .{ .internal = .{ .limit = 2_000_000 } } }, .{ .expand = .both });
@@ -82,6 +79,7 @@ pub fn textEntryWidgets() void {
     }
 
     var enter_pressed = false;
+    var te_id: dvui.Id = undefined;
     {
         var hbox = dvui.box(@src(), .{ .dir = .horizontal }, .{});
         defer hbox.deinit();
@@ -91,6 +89,7 @@ pub fn textEntryWidgets() void {
         left_alignment.spacer(@src(), 0);
 
         var te = dvui.textEntry(@src(), .{ .text = .{ .buffer = &text_entry_buf } }, .{ .max_size_content = .sizeM(20, 1) });
+        te_id = te.data().id;
         enter_pressed = te.enter_pressed;
         te.deinit();
 
@@ -106,6 +105,10 @@ pub fn textEntryWidgets() void {
         defer hbox.deinit();
 
         left_alignment.spacer(@src(), 0);
+
+        if (dvui.button(@src(), "Focus", .{}, .{})) {
+            dvui.focusWidget(te_id, null, null);
+        }
 
         dvui.label(@src(), "press enter", .{}, .{ .gravity_y = 0.5 });
 
@@ -268,7 +271,7 @@ pub fn textEntryWidgets() void {
             la2.spacer(@src(), 0);
 
             const normalOptions: dvui.Options = .{ .margin = dvui.TextEntryWidget.defaults.marginGet().plus(.all(1)) };
-            const errOptions: dvui.Options = .{ .color_border = dvui.themeGet().err.fill orelse .red, .border = dvui.Rect.all(2) };
+            const errOptions: dvui.Options = .{ .color_border = .{ .color = dvui.themeGet().err.fill orelse .red }, .border = dvui.Rect.all(2) };
 
             const name_error = dvui.dataGetPtrDefault(null, hbox2.data().id, "_name_error", bool, false);
             var te_name = dvui.textEntry(@src(), .{}, if (name_error.*) errOptions else normalOptions);
@@ -333,7 +336,7 @@ pub fn textEntryWidgets() void {
                 }
 
                 var bytes: ?[]u8 = null;
-                if (!std.fs.path.isAbsolute(filename)) {
+                if (!std.Io.Dir.path.isAbsolute(filename)) {
                     file_error.* = true;
                     const msg = std.fmt.allocPrint(dvui.currentWindow().lifo(), "Could not open \"{s}\"", .{filename}) catch filename;
                     defer dvui.currentWindow().lifo().free(msg);
@@ -485,7 +488,7 @@ pub fn textEntryWidgets() void {
         // filter suggestions to match the start of the entry
         if (combo.te.text_changed) blk: {
             const arena = dvui.currentWindow().lifo();
-            var filtered = std.ArrayListUnmanaged([]const u8).initCapacity(arena, entries.len) catch {
+            var filtered = std.ArrayList([]const u8).initCapacity(arena, entries.len) catch {
                 dvui.dataRemove(null, combo.te.data().id, "suggestions");
                 break :blk;
             };
@@ -524,7 +527,7 @@ pub fn textEntryWidgets() void {
         // dvui.suggestion processes events so text entry should be updated
         if (te.text_changed) blk: {
             const arena = dvui.currentWindow().lifo();
-            var filtered = std.ArrayListUnmanaged([]const u8).initCapacity(arena, entries.len) catch {
+            var filtered = std.ArrayList([]const u8).initCapacity(arena, entries.len) catch {
                 dvui.dataRemove(null, te.data().id, "suggestions");
                 break :blk;
             };
@@ -594,7 +597,7 @@ pub fn textEntryWidgets() void {
                 var value: T = undefined;
                 if (@typeInfo(T) == .int) {
                     S.value = std.math.clamp(S.value, std.math.minInt(T), std.math.maxInt(T));
-                    value = @intFromFloat(S.value);
+                    value = @trunc(S.value);
                     S.value = @floatFromInt(value);
                 } else {
                     value = @floatCast(S.value);

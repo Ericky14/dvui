@@ -46,6 +46,7 @@ pub const App = @import("App.zig");
 pub const Backend = @import("Backend.zig");
 pub const Window = @import("Window.zig");
 pub const Subwindows = @import("Subwindows.zig");
+pub const BlurBackdrop = @import("BlurBackdrop.zig");
 pub const Examples = @import("Examples.zig");
 
 pub const Color = @import("Color.zig");
@@ -54,8 +55,12 @@ pub const Font = @import("Font.zig");
 pub const Options = @import("Options.zig");
 pub const Point = @import("Point.zig").Point;
 pub const Path = @import("Path.zig");
+pub const Gradient = @import("Gradient.zig").Gradient;
+pub const ColorOrGradient = @import("Gradient.zig").ColorOrGradient;
 pub const Rect = @import("Rect.zig").Rect;
 pub const RectScale = @import("RectScale.zig");
+pub const Corner = @import("Corner.zig").Corner;
+pub const CornerRect = @import("Corner.zig").CornerRect;
 pub const ScrollInfo = @import("ScrollInfo.zig");
 pub const Size = @import("Size.zig").Size;
 pub const Theme = @import("Theme.zig");
@@ -64,6 +69,7 @@ pub const Vertex = @import("Vertex.zig");
 pub const Widget = @import("Widget.zig");
 pub const WidgetData = @import("WidgetData.zig");
 pub const Debug = @import("Debug.zig");
+pub const Profiler = @import("Profiler.zig");
 
 pub const entypo = @import("icons/entypo.zig");
 
@@ -81,8 +87,10 @@ pub const ReorderWidget = widgets.ReorderWidget;
 pub const Reorderable = ReorderWidget.Reorderable;
 pub const ButtonWidget = widgets.ButtonWidget;
 pub const ContextWidget = widgets.ContextWidget;
+pub const DockingWidget = widgets.DockingWidget;
 pub const DropdownWidget = widgets.DropdownWidget;
 pub const FloatingWindowWidget = widgets.FloatingWindowWidget;
+pub const OsWindowWidget = widgets.OsWindowWidget;
 pub const FloatingWidget = widgets.FloatingWidget;
 pub const FloatingTooltipWidget = widgets.FloatingTooltipWidget;
 pub const FloatingMenuWidget = widgets.FloatingMenuWidget;
@@ -109,7 +117,6 @@ pub const struct_ui = @import("struct_ui.zig");
 pub const enums = @import("enums.zig");
 pub const easing = @import("easing.zig");
 pub const testing = @import("testing.zig");
-pub const selection = @import("selection.zig");
 pub const TrackingAutoHashMap = @import("tracking_hash_map.zig").TrackingAutoHashMap;
 pub const PNGEncoder = @import("PNGEncoder.zig");
 pub const JPGEncoder = @import("JPGEncoder.zig");
@@ -186,41 +193,65 @@ pub fn textureInvalidateCache(key: Texture.Cache.Key) void {
     };
 }
 
-/// Set retain key for this texture key.  null means remove retain key.
+/// Retain this texture key.
 ///
-/// While a texture key has retain dvui will not free its texture.  To free it
-/// you must call either this with null, or `retainClear`.
+/// While retained dvui will not free its texture.  To free it you must call
+/// either `textureRelease` or `retainClear`.
 ///
 /// Only valid between `Window.begin`and `Window.end`.
-pub fn textureRetain(key: Texture.Cache.Key, retain_key: ?Id) void {
-    currentWindow().texture_cache.retain(currentWindow().gpa, key, retain_key) catch |err| {
+pub fn textureRetain(key: Texture.Cache.Key) void {
+    currentWindow().texture_cache.retain(currentWindow().gpa, key, .zero) catch |err| {
         dvui.logError(@src(), err, "Could not retain texture with key {x}", .{key});
         return;
     };
 }
 
-/// Clear retain for all textures and datas with this retain key.
-///
-/// Use to clear related datas/textures, maybe from a data's deinitfunction.
+/// Release this texture key.  dvui will free its texture normally.
 ///
 /// Only valid between `Window.begin`and `Window.end`.
-pub fn retainClear(retain_key: Id) void {
-    currentWindow().texture_cache.retainClear(retain_key);
-    currentWindow().data_store.retainClear(retain_key);
+pub fn textureRelease(key: Texture.Cache.Key) void {
+    currentWindow().texture_cache.retain(currentWindow().gpa, key, null) catch |err| {
+        dvui.logError(@src(), err, "Could not retain texture with key {x}", .{key});
+        return;
+    };
+}
+
+/// Set retain token for this texture key.  null means remove retain token.
+///
+/// While a texture key has retain dvui will not free its texture.  To free it
+/// you must call either this with null, or `retainClear`.
+///
+/// Only valid between `Window.begin`and `Window.end`.
+pub fn textureRetainToken(key: Texture.Cache.Key, retain_token: ?data.Token) void {
+    currentWindow().texture_cache.retain(currentWindow().gpa, key, retain_token) catch |err| {
+        dvui.logError(@src(), err, "Could not retain texture with key {x}", .{key});
+        return;
+    };
+}
+
+/// Clear retain for all textures and values with this retain token.
+///
+/// Use to clear related values/textures, maybe from a value's deinitfunction.
+///
+/// Only valid between `Window.begin`and `Window.end`.
+pub fn releaseAllToken(token: data.Token) void {
+    const w = dvui.currentWindow();
+    w.texture_cache.retainClear(token);
+    w.data_store.retainClear(token);
 }
 
 pub const Dragging = @import("Dragging.zig");
 /// See `Dragging.preStart`
 ///
 /// Only valid between `Window.begin`and `Window.end`.
-pub fn dragPreStart(p: Point.Physical, options: Dragging.StartOptions) void {
-    currentWindow().dragging.preStart(p, options);
+pub fn dragPreStart(b: dvui.enums.Button, p: Point.Physical, options: Dragging.StartOptions) void {
+    currentWindow().dragging.preStart(b, p, options);
 }
 /// See `Dragging.start`
 ///
 /// Only valid between `Window.begin`and `Window.end`.
-pub fn dragStart(p: Point.Physical, options: Dragging.StartOptions) void {
-    currentWindow().dragging.start(p, options);
+pub fn dragStart(b: dvui.enums.Button, p: Point.Physical, options: Dragging.StartOptions) void {
+    currentWindow().dragging.start(b, p, options);
 }
 /// Get offset previously given to `dragPreStart` or `dragStart`.
 ///
@@ -257,6 +288,8 @@ pub fn dragEnd() void {
 }
 
 pub const render = @import("render.zig");
+pub const render_tvg = @import("render_tvg.zig");
+pub const earcut = @import("earcut.zig");
 pub const RenderCommand = render.RenderCommand;
 pub const RenderTarget = render.Target;
 pub const renderTarget = render.Target.setAsCurrent;
@@ -296,8 +329,10 @@ pub const useFreeType = @import("default_options").freetype;
 pub const useTinyFileDialogs = @import("default_options").tiny_file_dialogs;
 pub const useTreeSitter = @import("default_options").tree_sitter;
 
-/// The amount of logical pixels to scroll per "tick" of the scroll wheel
-pub var scroll_speed: f32 = 80;
+/// The amount of logical pixels to scroll per "tick" of the scroll wheel.
+/// This variable is provided in case you need a quick fix.  If you need to
+/// adjust this, please file an issue.
+pub var scroll_speed: f32 = if (builtin.os.tag.isDarwin()) 40 else 80;
 
 /// When this is true, `animation` overwrites end_time so animations expire next frame.
 /// Timers are not affected.
@@ -316,7 +351,7 @@ pub var reduce_motion: bool = false;
 /// If positions/sizes are getting into this range, then likely something is going wrong.
 pub const max_float_safe: f32 = 2_000_000; // 2000000 and 2e6 for searchability
 
-pub const c = @import("c");
+pub const c = @import("dvui-c");
 
 pub var ft2lib: if (useFreeType) c.FT_Library else void = undefined;
 
@@ -359,12 +394,12 @@ pub const Id = enum(u64) {
         return @enumFromInt(hash.final());
     }
 
-    /// Make a new id by combining id with some data, commonly a string key like `"_value"`.
+    /// Make a new id by combining id with a name, commonly a string key like `"__value"`.
     /// This is how dvui tracks things in `dataGet`/`dataSet`, `animation`, and `timer`.
-    pub fn update(id: Id, input: []const u8) Id {
+    pub fn update(id: Id, name: []const u8) Id {
         var h = fnv.init();
         h.value = id.asU64();
-        h.update(input);
+        h.update(name);
         return @enumFromInt(h.final());
     }
 
@@ -393,12 +428,27 @@ pub var current_window: ?*Window = null;
 /// Global Io used by dvui functions, set by the backend when it is initialized.
 pub var io: Io = undefined;
 
+/// Global debug struct.
+pub var debug: dvui.Debug = .{};
+
 /// Get the current `dvui.Window` which corresponds to the OS window we are
 /// currently adding widgets to.
 ///
 /// Only valid between `Window.begin`and `Window.end`.
 pub fn currentWindow() *Window {
     return current_window orelse @panic("current_window was null, most dvui functions must be between Window.begin/end");
+}
+
+/// Guess which type of pointing device is being used (touchpad vs. mouse).
+/// Meaningful after a mouse wheel event when backends pass mouse type to
+/// `Window.addEventMouseWheel`.
+///
+/// Some backends can detect a switch between touchpad and mouse instantly,
+/// others require a 1 second gap.
+///
+/// Only valid between `Window.begin` and `Window.end`.
+pub fn mouseType() enums.MouseType {
+    return currentWindow().mouse_type;
 }
 
 /// Allocates space for a widget to the alloc stack, or the arena
@@ -484,11 +534,8 @@ pub fn themeSet(theme: Theme) void {
 }
 
 /// Toggle showing the debug window (run during `Window.end`).
-///
-/// Only valid between `Window.begin`and `Window.end`.
 pub fn toggleDebugWindow() void {
-    var cw = currentWindow();
-    cw.debug.open = !cw.debug.open;
+    dvui.debug.open = !dvui.debug.open;
 }
 
 pub const TagData = struct {
@@ -497,16 +544,16 @@ pub const TagData = struct {
     visible: bool,
 };
 
-pub fn tag(name: []const u8, data: TagData) void {
+pub fn tag(name: []const u8, tdata: TagData) void {
     var cw = currentWindow();
 
     if (cw.tags.map.getPtr(name)) |old_data| {
         if (old_data.used) {
-            dvui.log.err("duplicate tag name \"{s}\" id {x} (highlighted in red); you may need to pass .{{.id_extra=<loop index>}} as widget options (see https://github.com/david-vanderson/dvui/blob/master/readme-implementation.md#widget-ids )\n", .{ name, data.id });
-            cw.debug.widget_id = data.id;
+            dvui.log.err("duplicate tag name \"{s}\" id {x} (highlighted in red); you may need to pass .{{.id_extra=<loop index>}} as widget options (see https://github.com/david-vanderson/dvui/blob/master/readme-implementation.md#widget-ids )\n", .{ name, tdata.id });
+            dvui.Debug.errorOutline(tdata.rect);
         }
 
-        old_data.*.inner = data;
+        old_data.*.inner = tdata;
         old_data.used = true;
         return;
     }
@@ -517,8 +564,8 @@ pub fn tag(name: []const u8, data: TagData) void {
         return;
     };
 
-    cw.tags.put(cw.gpa, name_copy, data) catch |err| {
-        dvui.log.err("tag() \"{s}\" got {any} for id {x}\n", .{ name, err, data.id });
+    cw.tags.put(cw.gpa, name_copy, tdata) catch |err| {
+        dvui.log.err("tag() \"{s}\" got {any} for id {x}\n", .{ name, err, tdata.id });
         cw.gpa.free(name_copy);
     };
 }
@@ -529,7 +576,12 @@ pub fn tagGet(name: []const u8) ?TagData {
 
 /// Nanosecond timestamp for this frame.
 ///
-/// Updated during `Window.begin`.  Will not go backwards.
+/// Updated during `Window.begin`.  Will not go backwards.  Good for
+/// performance timing.
+///
+/// If you need to time a UI thing, consider `secondsSinceLastFrame`, as that
+/// will report a reasonable value even if the clock goes wrong and
+/// `frameTimeNS` stops advancing.
 ///
 /// Only valid between `Window.begin`and `Window.end`.
 pub fn frameTimeNS() i128 {
@@ -594,12 +646,14 @@ pub fn iconWidth(name: []const u8, tvg_bytes: []const u8, height: f32) TvgError!
     return height * @as(f32, @floatFromInt(parser.header.width)) / @as(f32, @floatFromInt(parser.header.height));
 }
 pub const IconRenderOptions = struct {
-    /// if null uses original fill colors, use .transparent to disable fill
-    fill_color: ?Color = .white,
+    /// if null uses original fill colors, use .transparent to disable fill.
+    /// Flat color, or a gradient drawn across the icon's bounding box.
+    fill_color: ?ColorOrGradient = .white,
     /// if null uses original stroke width
     stroke_width: ?f32 = null,
-    /// if null uses original stroke colors
-    stroke_color: ?Color = .white,
+    /// if null uses original stroke colors. Flat color, or a gradient drawn
+    /// across the icon's bounding box.
+    stroke_color: ?ColorOrGradient = .white,
 
     // note: IconWidget tests against default values
 };
@@ -781,9 +835,9 @@ pub const CaptureMouse = struct {
 ///
 /// Only valid between `Window.begin`and `Window.end`.
 pub fn captureMouse(wd: ?*const WidgetData, event_num: u16) void {
-    const cm = if (wd) |data| CaptureMouse{
-        .id = data.id,
-        .rect = data.borderRectScale().r,
+    const cm = if (wd) |wdata| CaptureMouse{
+        .id = wdata.id,
+        .rect = wdata.borderRectScale().r,
         .subwindow_id = subwindowCurrentId(),
     } else null;
     captureMouseCustom(cm, event_num);
@@ -799,13 +853,15 @@ pub fn captureMouseCustom(cm: ?CaptureMouse, event_num: u16) void {
         // log.debug("Mouse capture (event {d}): {any}", .{ event_num, cm });
         cw.captured_last_frame = true;
         cw.captureEvents(event_num, capture.id);
+        if (dvui.debug.logEvents(null)) log.debug("Capture {x}", .{capture.id});
     } else {
         // Unmark all following mouse events
         cw.captureEvents(event_num, null);
+        if (dvui.debug.logEvents(null)) log.debug("Capture null", .{});
         // log.debug("Mouse uncapture (event {d}): {?any}", .{ event_num, cw.capture });
         // for (dvui.events()) |*e| {
         //     if (e.evt == .mouse) {
-        //         log.debug("{s}: win {?x}, widget {?x}", .{ @tagName(e.evt.mouse.action), e.target_windowId, e.target_widgetId });
+        //         log.debug("{s}: widget {?x}", .{ @tagName(e.evt.mouse.action), e.target_widgetId });
         //     }
         // }
     }
@@ -986,6 +1042,15 @@ pub fn clipboardText() []const u8 {
     };
 }
 
+/// Only valid between `Window.begin`and `Window.end`.
+pub fn primarySelectionText() []const u8 {
+    const cw = currentWindow();
+    return cw.backend.primarySelectionText() catch |err| blk: {
+        logError(@src(), err, "Could not get primary selection text", .{});
+        break :blk "";
+    };
+}
+
 /// Set the textual content of the system clipboard.
 ///
 /// Only valid between `Window.begin`and `Window.end`.
@@ -1032,7 +1097,14 @@ test openURL {
 }
 
 /// Seconds elapsed between last frame and current.  This value can be quite
-/// high after a period with no user interaction.
+/// high after a period with no user interaction, but won't be above ~71.5
+/// minutes (2^32 micros).
+///
+/// If the underlying clock goes backwards, this will report a reasonable
+/// default value (10ms).
+///
+/// This is usually the right thing for UI timing.  For performance timing, see
+/// `frameTimeNS`.
 ///
 /// Only valid between `Window.begin`and `Window.end`.
 pub fn secondsSinceLastFrame() f32 {
@@ -1077,8 +1149,6 @@ pub fn parentReset(id: Id, prev_parent: Widget) void {
     const cw = currentWindow();
     const currentId = cw.current_parent.data().id;
     if (id != currentId) {
-        cw.debug.widget_id = currentId;
-
         log.err("widget is not closed within its parent. did you forget to call `.deinit()`?", .{});
 
         var iter = cw.current_parent.data().iterator();
@@ -1090,6 +1160,7 @@ pub fn parentReset(id: Id, prev_parent: Widget) void {
                 wd.options.name orelse "???",
                 wd.id,
             });
+            dvui.Debug.errorOutline(wd.rectScale().r);
         }
     }
     cw.current_parent = prev_parent;
@@ -1167,23 +1238,125 @@ pub fn minSizeGet(id: Id) ?Size {
     return currentWindow().min_sizes.get(id);
 }
 
-/// Return the maximum of min_size and the min size for id from last frame.
-///
-/// See `minSizeGet` to get only the min size from last frame.
-///
-/// Only valid between `Window.begin`and `Window.end`.
-pub fn minSize(id: Id, min_size: Size) Size {
-    var size = min_size;
+pub const data = struct {
+    pub const Key = enum(u64) {
+        _,
 
-    // Need to take the max of both given and previous.  ScrollArea could be
-    // passed a min size Size{.w = 0, .h = 200} meaning to get the width from the
-    // previous min size.
-    if (minSizeGet(id)) |ms| {
-        size = Size.max(size, ms);
+        /// Combine a widget id and string.  This is the standard way to store
+        /// data associated with a widget.  Different string values allow
+        /// storing multiple pieces of data under the same widget id.
+        ///
+        /// * dvui itself prefixes string with double underscore (__)
+        /// * 3rd party librares should prefix with the name of the library (mylib_) or dns name (com.example.mylib.)
+        pub fn widget(id: dvui.Id, string: []const u8) Key {
+            return @enumFromInt(id.update(string).asU64());
+        }
+
+        pub fn U64(int: u64) Key {
+            return @enumFromInt(int);
+        }
+    };
+
+    /// Used with `retainToken` and `textureRetain` to identify a group of
+    /// related values that can be released together with `releaseAllToken`.
+    pub const Token = enum(u64) {
+        zero = 0,
+        _,
+
+        pub fn fromId(id: dvui.Id) Token {
+            return @enumFromInt(@intFromEnum(id));
+        }
+    };
+
+    pub fn get(win: ?*Window, key: Key, comptime T: type) ?T {
+        const w = currentOverrideOrPanic(win);
+        return if (w.data_store.getPtr(key, T)) |v| v.* else null;
     }
 
-    return size;
-}
+    pub fn getPtr(win: ?*Window, key: Key, comptime T: type) ?*T {
+        const w = currentOverrideOrPanic(win);
+        return w.data_store.getPtr(key, T);
+    }
+
+    pub fn getSlice(win: ?*Window, key: Key, comptime T: type) ?T {
+        const w = currentOverrideOrPanic(win);
+        return w.data_store.getSlice(key, T);
+    }
+
+    pub fn getDefault(win: ?*Window, key: Key, comptime T: type, default: T) T {
+        const w = currentOverrideOrPanic(win);
+        if (w.data_store.getPtr(key, T)) |v| return v.* else {
+            w.data_store.set(w.gpa, key, default) catch |err| {
+                dvui.logError(@src(), err, "data.getDefault key {x}", .{key});
+            };
+            return default;
+        }
+    }
+
+    pub fn getPtrDefault(win: ?*Window, key: Key, comptime T: type, default: T) *T {
+        const w = currentOverrideOrPanic(win);
+        return w.data_store.getPtrDefault(w.gpa, key, T, default) catch |err| {
+            dvui.logError(@src(), err, "data.getPtrDefault key {x}", .{key});
+            @panic("data.getPtrDefault failed");
+        };
+    }
+
+    pub fn getSliceDefault(win: ?*Window, key: Key, comptime T: type, default: []const @typeInfo(T).pointer.child) T {
+        const w = currentOverrideOrPanic(win);
+        return w.data_store.getSliceDefault(w.gpa, key, T, default) catch |err| {
+            dvui.logError(@src(), err, "data.getSliceDefault key {x}", .{key});
+            @panic("data.getSliceDefault failed");
+        };
+    }
+
+    pub fn set(win: ?*Window, key: Key, value: anytype) void {
+        const w = currentOverrideOrPanic(win);
+        w.data_store.set(w.gpa, key, value) catch |err| {
+            dvui.logError(@src(), err, "data.set key {x}", .{key});
+        };
+    }
+
+    pub fn setSlice(win: ?*Window, key: Key, value: anytype) void {
+        const w = currentOverrideOrPanic(win);
+        (w.data_store.setSlice(w.gpa, key, value)) catch |err| {
+            dvui.logError(@src(), err, "data.setSlice key {x}", .{key});
+        };
+    }
+
+    pub fn setSliceCopies(win: ?*Window, key: Key, value: anytype, num_copies: usize) void {
+        const w = currentOverrideOrPanic(win);
+        (w.data_store.setSliceCopies(w.gpa, key, value, num_copies)) catch |err| {
+            dvui.logError(@src(), err, "data.setSliceCopies key {x}", .{key});
+        };
+    }
+
+    pub fn retain(win: ?*Window, key: Key) void {
+        retainToken(win, key, .zero);
+    }
+
+    pub fn release(win: ?*Window, key: Key) void {
+        retainToken(win, key, null);
+    }
+
+    pub fn retainToken(win: ?*Window, key: Key, token: ?Token) void {
+        const w = currentOverrideOrPanic(win);
+        w.data_store.retain(w.gpa, key, token) catch |err| {
+            dvui.logError(@src(), err, "data.retain key {x}", .{key});
+        };
+    }
+
+    pub fn deinitFunction(win: ?*Window, key: Key, func: Data.DeinitFunction) void {
+        const w = currentOverrideOrPanic(win);
+        w.data_store.setDeinitFunction(key, func);
+    }
+
+    pub fn remove(win: ?*Window, key: Key) void {
+        const w = currentOverrideOrPanic(win);
+        w.data_store.remove(w.gpa, key) catch |err| {
+            dvui.logError(@src(), err, "data.remove key {x}", .{key});
+        };
+    }
+};
 
 /// DEPRECATED: See `dvui.Id.extendId`
 pub const hashSrc = void;
@@ -1195,185 +1368,137 @@ fn currentOverrideOrPanic(win: ?*Window) *Window {
     return win orelse current_window orelse @panic("current_window was null, pass a *Window as first parameter if calling from other thread or outside window.begin()/end()");
 }
 
-/// Set key/value pair for given id.
+/// Store value under key (id+name).
 ///
 /// Can be called from any thread.
 ///
 /// If called from non-GUI thread or outside `Window.begin`/`Window.end`, you must
-/// pass a pointer to the `Window` you want to add the data to.
+/// pass a pointer to the `Window` you want to add the value to.
 ///
-/// Stored data with the same id/key will be overwritten if it has the same size,
-/// otherwise the data will be freed at the next call to `Window.end`. This means
-/// that if a pointer to the same id/key was retrieved earlier, the value behind
+/// Stored value with the same key will be overwritten if it has the same size,
+/// otherwise the value will be freed at the next call to `Window.end`. This means
+/// that if a pointer to the same key was retrieved earlier, the value behind
 /// that pointer would be modified.
 ///
 /// If you want to store the contents of a slice, use `dataSetSlice`.
-pub fn dataSet(win: ?*Window, id: Id, key: []const u8, data: anytype) void {
-    const w = currentOverrideOrPanic(win);
-    w.data_store.set(w.gpa, id.update(key), data) catch |err| {
-        dvui.logError(@src(), err, "id {x} key {s}", .{ id, key });
-    };
+pub fn dataSet(win: ?*Window, id: Id, name: []const u8, value: anytype) void {
+    data.set(win, .widget(id, name), value);
 }
 
-/// Set a deinit function for data stored under id/key.
+/// Set a deinit function for value stored under key (id+name).
 ///
 /// Can be called from any thread.
 ///
 /// If called from non-GUI thread or outside `Window.begin`/`Window.end`, you must
-/// pass a pointer to the `Window` you want to add the data to.
+/// pass a pointer to the `Window` you want to add the value to.
 ///
-/// When data for this id/key is about to be freed by dvui, it will first call
-/// the passed function.  This is useful for cases where data for a widget
+/// When value for this id/name is about to be freed by dvui, it will first call
+/// the passed function.  This is useful for cases where value for a widget
 /// allocates memory outside of your control.
-pub fn dataSetDeinitFunction(win: ?*Window, id: Id, key: []const u8, func: Data.DeinitFunction) void {
-    const w = currentOverrideOrPanic(win);
-    w.data_store.setDeinitFunction(id.update(key), func);
+pub fn dataSetDeinitFunction(win: ?*Window, id: Id, name: []const u8, func: Data.DeinitFunction) void {
+    data.deinitFunction(win, .widget(id, name), func);
 }
 
-/// Set retain key for this id/key.  null means remove retain key.
+/// Set retain token for this key (id+name).  null means remove retain token.
 ///
 /// Can be called from any thread.
 ///
 /// If called from non-GUI thread or outside `Window.begin`/`Window.end`, you must
-/// pass a pointer to the `Window` you want to add the data to.
+/// pass a pointer to the `Window` you want to add the value to.
 ///
-/// While an id/key has retain dvui will not free its data.  To free it you
+/// While a key has retain dvui will not free its value.  To free it you
 /// must call either this with null, `dataRemove`, or `retainClear`.
-pub fn dataRetain(win: ?*Window, id: Id, key: []const u8, retain_key: ?Id) void {
-    const w = currentOverrideOrPanic(win);
-    w.data_store.retain(w.gpa, id.update(key), retain_key) catch |err| {
-        dvui.logError(@src(), err, "id {x} key {s}", .{ id, key });
-    };
+pub fn dataRetain(win: ?*Window, id: Id, name: []const u8, token: ?data.Token) void {
+    data.retainToken(win, .widget(id, name), token);
 }
 
-/// Set key/value pair for given id, copying the slice contents. Can be passed
-/// a slice or pointer to an array.
+/// Set value for key (id+name), copying the slice contents. Can be passed a
+/// slice or pointer to an array.
 ///
 /// Can be called from any thread.
 ///
-/// Stored data with the same id/key will be overwritten if it has the same size,
-/// otherwise the data will be freed at the next call to `Window.end`. This means
-/// that if the slice with the same id/key was retrieved earlier, the value behind
+/// Stored value with the same key will be overwritten if it has the same size,
+/// otherwise the value will be freed at the next call to `Window.end`. This means
+/// that if the slice with the same key was retrieved earlier, the value behind
 /// that slice would be modified.
 ///
 /// If called from non-GUI thread or outside `Window.begin`/`Window.end`, you must
-/// pass a pointer to the `Window` you want to add the data to.
-pub fn dataSetSlice(win: ?*Window, id: Id, key: []const u8, data: anytype) void {
-    const w = currentOverrideOrPanic(win);
-    (w.data_store.setSlice(w.gpa, id.update(key), data)) catch |err| {
-        dvui.logError(@src(), err, "id {x} key {s}", .{ id, key });
-    };
+/// pass a pointer to the `Window` you want to add the value to.
+pub fn dataSetSlice(win: ?*Window, id: Id, name: []const u8, value: anytype) void {
+    data.setSlice(win, .widget(id, name), value);
 }
 
-/// Same as `dataSetSlice`, but will copy data `num_copies` times all concatenated
+/// Same as `dataSetSlice`, but will copy value `num_copies` times all concatenated
 /// into a single slice.  Useful to get dvui to allocate a specific number of
 /// entries that you want to fill in after.
-pub fn dataSetSliceCopies(win: ?*Window, id: Id, key: []const u8, data: anytype, num_copies: usize) void {
-    const w = currentOverrideOrPanic(win);
-    (w.data_store.setSliceCopies(w.gpa, id.update(key), data, num_copies)) catch |err| {
-        dvui.logError(@src(), err, "id {x} key {s}", .{ id, key });
-    };
+pub fn dataSetSliceCopies(win: ?*Window, id: Id, name: []const u8, value: anytype, num_copies: usize) void {
+    data.setSliceCopies(win, .widget(id, name), value, num_copies);
 }
 
-/// Set key/value pair for given id.
+/// Retrieve the value for key (id+name).
 ///
 /// Can be called from any thread.
 ///
 /// If called from non-GUI thread or outside `Window.begin`/`Window.end`, you must
-/// pass a pointer to the `Window` you want to add the data to.
+/// pass a pointer to the `Window` you want to add the value to.
 ///
-/// Stored data with the same id/key will be freed at next `win.end()`.
-///
-/// If `copy_slice` is true, data must be a slice or pointer to array, and the
-/// contents are copied into internal storage. If false, only the slice itself
-/// (ptr and len) and stored.
-pub fn dataSetAdvanced(win: ?*Window, id: Id, key: []const u8, data: anytype, comptime copy_slice: bool, num_copies: usize) void {
-    if (copy_slice) {
-        return dataSetSliceCopies(win, id, key, data, num_copies);
-    } else {
-        return dataSet(win, id, key, data);
-    }
-}
-
-/// Retrieve the value for given key associated with id.
-///
-/// Can be called from any thread.
-///
-/// If called from non-GUI thread or outside `Window.begin`/`Window.end`, you must
-/// pass a pointer to the `Window` you want to add the data to.
-///
-/// If you want a pointer to the stored data, use `dataGetPtr`.
+/// If you want a pointer to the stored value, use `dataGetPtr`.
 ///
 /// If you want to get the contents of a stored slice, use `dataGetSlice`.
-pub fn dataGet(win: ?*Window, id: Id, key: []const u8, comptime T: type) ?T {
-    const w = currentOverrideOrPanic(win);
-    return if (w.data_store.getPtr(id.update(key), T)) |v| v.* else null;
+pub fn dataGet(win: ?*Window, id: Id, name: []const u8, comptime T: type) ?T {
+    return data.get(win, .widget(id, name), T);
 }
 
-/// Retrieve the value for given key associated with id.  If no value was stored, store default and then return it.
+/// Retrieve the value for key (id+name).  If no value was stored, store default and then return it.
 ///
 /// Can be called from any thread.
 ///
 /// If called from non-GUI thread or outside `Window.begin`/`Window.end`, you must
-/// pass a pointer to the `Window` you want to add the data to.
+/// pass a pointer to the `Window` you want to add the value to.
 ///
-/// If you want a pointer to the stored data, use `dataGetPtrDefault`.
+/// If you want a pointer to the stored value, use `dataGetPtrDefault`.
 ///
 /// If you want to get the contents of a stored slice, use `dataGetSlice`.
-pub fn dataGetDefault(win: ?*Window, id: Id, key: []const u8, comptime T: type, default: T) T {
-    const w = currentOverrideOrPanic(win);
-    if (w.data_store.getPtr(id.update(key), T)) |v| return v.* else {
-        w.data_store.set(w.gpa, id.update(key), default) catch |err| {
-            dvui.logError(@src(), err, "id {x} key {s}", .{ id, key });
-        };
-        return default;
-    }
+pub fn dataGetDefault(win: ?*Window, id: Id, name: []const u8, comptime T: type, default: T) T {
+    return data.getDefault(win, .widget(id, name), T, default);
 }
 
-/// Retrieve a pointer to the value for given key associated with id.  If no
-/// value was stored, store default and then return a pointer to the stored
-/// value.
+/// Retrieve a pointer to the value for key (id+name).  If no value was
+/// stored, store default and then return a pointer to the stored value.
 ///
 /// Can be called from any thread.
 ///
 /// If called from non-GUI thread or outside `Window.begin`/`Window.end`, you must
-/// pass a pointer to the `Window` you want to add the data to.
+/// pass a pointer to the `Window` you want to add the value to.
 ///
 /// Returns a pointer to internal storage, which will be freed after a frame
-/// where there is no call to any `dataGet`/`dataSet` functions for that id/key
-/// combination.
+/// where there is no call to any `dataGet`/`dataSet` functions for this key.
 ///
 /// The pointer will always be valid until the next call to `Window.end`.
 ///
 /// If you want to get the contents of a stored slice, use `dataGetSlice`.
-pub fn dataGetPtrDefault(win: ?*Window, id: Id, key: []const u8, comptime T: type, default: T) *T {
-    const w = currentOverrideOrPanic(win);
-    return w.data_store.getPtrDefault(w.gpa, id.update(key), T, default) catch |err| {
-        dvui.logError(@src(), err, "id {x} key {s}", .{ id, key });
-        @panic("dataGetPtrDefault failed");
-    };
+pub fn dataGetPtrDefault(win: ?*Window, id: Id, name: []const u8, comptime T: type, default: T) *T {
+    return data.getPtrDefault(win, .widget(id, name), T, default);
 }
 
-/// Retrieve a pointer to the value for given key associated with id.
+/// Retrieve a pointer to the value for key (id+name).
 ///
 /// Can be called from any thread.
 ///
 /// If called from non-GUI thread or outside `Window.begin`/`Window.end`, you must
-/// pass a pointer to the `Window` you want to add the data to.
+/// pass a pointer to the `Window` you want to add the value to.
 ///
 /// Returns a pointer to internal storage, which will be freed after a frame
-/// where there is no call to any `dataGet`/`dataSet` functions for that id/key
-/// combination.
+/// where there is no call to any `dataGet`/`dataSet` functions for this key.
 ///
 /// The pointer will always be valid until the next call to `Window.end`.
 ///
 /// If you want to get the contents of a stored slice, use `dataGetSlice`.
-pub fn dataGetPtr(win: ?*Window, id: Id, key: []const u8, comptime T: type) ?*T {
-    const w = currentOverrideOrPanic(win);
-    return w.data_store.getPtr(id.update(key), T);
+pub fn dataGetPtr(win: ?*Window, id: Id, name: []const u8, comptime T: type) ?*T {
+    return data.getPtr(win, .widget(id, name), T);
 }
 
-/// Retrieve slice contents for given key associated with id.
+/// Retrieve slice contents for key (id+name).
 ///
 /// `dataSetSlice` strips const from the slice type, so always call
 /// `dataGetSlice` with a mutable slice type ([]u8, not []const u8).
@@ -1381,62 +1506,45 @@ pub fn dataGetPtr(win: ?*Window, id: Id, key: []const u8, comptime T: type) ?*T 
 /// Can be called from any thread.
 ///
 /// If called from non-GUI thread or outside `Window.begin`/`Window.end`, you must
-/// pass a pointer to the `Window` you want to add the data to.
+/// pass a pointer to the `Window` you want to add the value to.
 ///
 /// The returned slice points to internal storage, which will be freed after
-/// a frame where there is no call to any `dataGet`/`dataSet` functions for that
-/// id/key combination.
+/// a frame where there is no call to any `dataGet`/`dataSet` functions for this
+/// key.
 ///
 /// The slice will always be valid until the next call to `Window.end`.
-pub fn dataGetSlice(win: ?*Window, id: Id, key: []const u8, comptime T: type) ?T {
-    const w = currentOverrideOrPanic(win);
-    return w.data_store.getSlice(id.update(key), T);
+pub fn dataGetSlice(win: ?*Window, id: Id, name: []const u8, comptime T: type) ?T {
+    return data.getSlice(win, .widget(id, name), T);
 }
 
-/// Retrieve slice contents for given key associated with id.
+/// Retrieve slice contents for key (id+name).
 ///
-/// If the id/key doesn't exist yet, store the default slice into internal
+/// If the key doesn't exist yet, store the default slice into internal
 /// storage, and then return the internal storage slice.
 ///
 /// Can be called from any thread.
 ///
 /// If called from non-GUI thread or outside `Window.begin`/`Window.end`, you must
-/// pass a pointer to the `Window` you want to add the data to.
+/// pass a pointer to the `Window` you want to add the value to.
 ///
 /// The returned slice points to internal storage, which will be freed after
-/// a frame where there is no call to any `dataGet`/`dataSet` functions for that
-/// id/key combination.
+/// a frame where there is no call to any `dataGet`/`dataSet` functions for this
+/// key.
 ///
 /// The slice will always be valid until the next call to `Window.end`.
-pub fn dataGetSliceDefault(win: ?*Window, id: Id, key: []const u8, comptime T: type, default: []const @typeInfo(T).pointer.child) T {
-    const w = currentOverrideOrPanic(win);
-    return w.data_store.getSliceDefault(w.gpa, id.update(key), T, default) catch |err| {
-        dvui.logError(@src(), err, "id {x} key {s}", .{ id, key });
-        @panic("dataGetSliceDefault failed");
-    };
+pub fn dataGetSliceDefault(win: ?*Window, id: Id, name: []const u8, comptime T: type, default: []const @typeInfo(T).pointer.child) T {
+    return data.getSliceDefault(win, .widget(id, name), T, default);
 }
 
-// returns the backing slice of bytes if we have it
-pub fn dataGetInternal(win: ?*Window, id: Id, key: []const u8, comptime T: type, slice: bool) ?[]u8 {
-    if (slice) {
-        return dataGetPtr(win, id, key, T);
-    } else {
-        return dataGetSlice(win, id, key, T);
-    }
-}
-
-/// Remove key (and data if any) for given id.  The data will be freed at next
+/// Remove key (id+name) and associated value (if any).  The value will be freed at next
 /// `Window.end`.
 ///
 /// Can be called from any thread.
 ///
 /// If called from non-GUI thread or outside `Window.begin`/`Window.end`, you must
 /// pass a pointer to the `Window` you want to add the dialog to.
-pub fn dataRemove(win: ?*Window, id: Id, key: []const u8) void {
-    const w = currentOverrideOrPanic(win);
-    return w.data_store.remove(w.gpa, id.update(key)) catch |err| {
-        dvui.logError(@src(), err, "id {x} key {s}", .{ id, key });
-    };
+pub fn dataRemove(win: ?*Window, id: Id, name: []const u8) void {
+    data.remove(win, .widget(id, name));
 }
 
 test "data get/set/remove basic" {
@@ -1551,11 +1659,6 @@ pub const EventMatchOptions = struct {
     /// During a drag, only match pointer events if this is the dragName.
     drag_name: ?[]const u8 = null,
 
-    /// true means match all focus-based events routed to the subwindow with
-    /// id.  This is how subwindows catch things like tab if no widget in that
-    /// subwindow has focus.
-    cleanup: bool = false,
-
     /// (Only in Debug) If true, `eventMatch` will log a reason when returning
     /// false.  Useful to understand why you aren't matching some event.
     debug: if (builtin.mode == .Debug) bool else void = if (builtin.mode == .Debug) false else undefined,
@@ -1583,7 +1686,7 @@ pub fn eventMatch(e: *Event, opts: EventMatchOptions) bool {
     switch (e.evt) {
         .app => {}, // app events always match
         .window => {
-            if (e.target_windowId) |wid| {
+            if (e.target_widgetId) |wid| {
                 if (wid != opts.id) {
                     if (builtin.mode == .Debug and opts.debug) {
                         log.debug("eventMatch {f} not to this window", .{e});
@@ -1593,27 +1696,13 @@ pub fn eventMatch(e: *Event, opts: EventMatchOptions) bool {
             }
         },
         .key, .text => {
-            if (e.target_windowId) |wid| {
-                // focusable event
-                if (opts.cleanup) {
-                    // window is catching all focus-routed events that didn't get
-                    // processed (maybe the focus widget never showed up)
-                    if (wid != opts.id) {
-                        // not the focused window
-                        if (builtin.mode == .Debug and opts.debug) {
-                            log.debug("eventMatch {f} (cleanup) focus not to this window", .{e});
-                        }
-                        return false;
-                    }
-                } else {
-                    if (e.target_widgetId != opts.id and (opts.focus_id == null or opts.focus_id.? != e.target_widgetId)) {
-                        // not the focused widget
-                        if (builtin.mode == .Debug and opts.debug) {
-                            log.debug("eventMatch {f} focus not to this widget", .{e});
-                        }
-                        return false;
-                    }
+            // focusable event
+            if (e.target_widgetId != opts.id and (opts.focus_id == null or opts.focus_id.? != e.target_widgetId)) {
+                // not the focused widget
+                if (builtin.mode == .Debug and opts.debug) {
+                    log.debug("eventMatch {f} focus not to this widget", .{e});
                 }
+                return false;
             }
         },
         .mouse => |me| {
@@ -1729,7 +1818,7 @@ pub fn clickedEx(wd: *const WidgetData, opts: ClickOptions) ?Event.EventTypes {
                     dvui.captureMouse(wd, e.num);
 
                     // for touch events, we want to cancel our click if a drag is started
-                    dvui.dragPreStart(me.p, .{});
+                    dvui.dragPreStart(me.button, me.p, .{});
                 } else if (me.action == .release and (if (opts.buttons == .pointer) me.button.pointer() else true)) {
                     // mouse button was released, do we still have mouse capture?
                     if (dvui.captured(wd.id)) {
@@ -1862,6 +1951,28 @@ pub fn animationGet(id: Id, key: []const u8) ?Animation {
     return currentWindow().animations.get(h);
 }
 
+/// How long a hover fade (see `hoverFade`) takes to reach full intensity.
+pub var hover_fade_secs: f32 = 0.12;
+
+/// Lets a hover wash fade in and out (instead of snapping the frame at once).
+/// Call at most once per widget per frame.
+///
+/// Only valid between `Window.begin` and `Window.end`.
+pub fn hoverFade(id: Id, hovered: bool) f32 {
+    const target: f32 = if (hovered) 1 else 0;
+    if (reduce_motion or hover_fade_secs == 0.0) return target;
+    // Default 0 (instead of target) so a widget with the first frame already hovered
+    // (e.g. a context-menu item that pops up under the cursor) fades in rather
+    // than starting fully lit.
+    const cur = dataGetPtrDefault(null, id, "__hover_fade", f32, 0);
+    if (cur.* != target) {
+        const step = currentWindow().secs_since_last_frame / hover_fade_secs;
+        cur.* = if (cur.* < target) @min(target, cur.* + step) else @max(target, cur.* - step);
+        refresh(null, @src(), id);
+    }
+    return cur.*;
+}
+
 /// Add a timer for id that will be `timerDone` on the first frame after micros
 /// has passed.
 ///
@@ -1943,7 +2054,7 @@ pub fn scrollDrag(scroll_drag: ScrollDragOptions) void {
 pub const TabIndex = struct {
     windowId: Id,
     widgetId: Id,
-    pt: Point.Physical,
+    rect: ?Rect.Physical,
     tab_index_group: Id,
     tabIndex: u16,
 
@@ -1982,7 +2093,7 @@ pub fn tabIndexSetEx(widget_id: Id, tab_index: ?u16, rect: ?Rect.Physical, tab_g
     var ti = TabIndex{
         .windowId = cw.subwindows.current_id,
         .widgetId = widget_id,
-        .pt = if (rect) |r| r.topLeft() else .{},
+        .rect = rect,
         .tab_index_group = TabIndexGroup.current,
         .tabIndex = (tab_index orelse math.maxInt(u16)),
         .tab_group = tab_group,
@@ -2111,7 +2222,7 @@ pub fn tabIndexNextEx(event_num: ?u16, tabidxs: []dvui.TabIndex, base_tig: Id, i
         break :outer;
     }
 
-    focusWidget(newId, null, event_num);
+    focusWidget(newId, cw.subwindows.focused_id, event_num);
 
     if (newId == null) {
         // intentionally moving to the null focus state, don't try to recover
@@ -2226,7 +2337,7 @@ pub fn tabIndexPrevEx(event_num: ?u16, tabidxs: []dvui.TabIndex, base_tig: Id, i
         break :outer;
     }
 
-    focusWidget(newId, null, event_num);
+    focusWidget(newId, cw.subwindows.focused_id, event_num);
 
     if (oldshadow) {
         // If we shift-tabbed from inside a focusGroup, we will always focus
@@ -2240,6 +2351,126 @@ pub fn tabIndexPrevEx(event_num: ?u16, tabidxs: []dvui.TabIndex, base_tig: Id, i
         if (cw.subwindows.focused()) |sw| {
             sw.kb_restart_widget_id = null;
         }
+    }
+}
+
+fn tabIndexDirScore(unit: Point.Physical, start: Point.Physical, edge: Point.Physical, r: Rect.Physical, id: dvui.Id, min: *f32, min_id: *?dvui.Id) void {
+
+    // reject if any corners are behind us
+    var p = r.topLeft().diff(start);
+    if (unit.x * p.x + unit.y * p.y <= 0) return;
+    p = r.topRight().diff(start);
+    if (unit.x * p.x + unit.y * p.y <= 0) return;
+    p = r.bottomLeft().diff(start);
+    if (unit.x * p.x + unit.y * p.y <= 0) return;
+    p = r.bottomRight().diff(start);
+    if (unit.x * p.x + unit.y * p.y <= 0) return;
+
+    p = r.center();
+    //Path.stroke(.{ .points = &.{p} }, .{ .thickness = 5.0, .color = .green, .after = true });
+    p = p.diff(start);
+
+    const dot = unit.x * p.x + unit.y * p.y;
+    const dot_edge = unit.x * edge.x + unit.y * edge.y;
+
+    // center of target must be further than starting edge
+    if (dot < dot_edge) return;
+
+    const along = unit.scale(dot, Point.Physical);
+    const across = p.diff(along);
+
+    const d_along = along.length();
+    const d_across = across.length();
+
+    // Generally widgets are in logical rows.
+    // When moving vertically, it's more important to land somewhere in the
+    // next row, less important exactly where.  So downweight d_across.
+    // When moving horizontally, stay in the row, so upweight d_across.
+
+    // weight goes .1 -> 1.1 as direction goes from vertical to 45 deg.
+    var across_weight: f32 = 0.1 + @abs(unit.x) / 0.71;
+    // weight goes 1.1 -> 101.1 as direction goes from 45deg to horizontal.
+    if (@abs(unit.x) > 0.71) across_weight = 1.1 + 100 * (@abs(unit.x) - 0.71) / (1.0 - 0.71);
+
+    //Path.stroke(.{ .points = &.{ start, start.plus(along), start.plus(along).plus(across) } }, .{ .thickness = 2.0, .color = .green });
+
+    const score = d_along + d_across * across_weight;
+
+    if (score < min.*) {
+        min.* = score;
+        min_id.* = id;
+    }
+}
+
+/// Move focus to the closest widget in `angle` direction (radians clockwise
+/// from positive x axis).  Uses the tab index values from last frame.
+///
+/// If you are calling this due to processing an event, you can pass `Event`'s num
+/// and any further events will have their focus adjusted.
+///
+/// Only valid between `Window.begin`and `Window.end`.
+pub fn tabIndexDirection(angle: f32, event_num: ?u16) void {
+    tabIndexDirectionEx(angle, event_num, currentWindow().tab_index_prev.items);
+}
+
+pub fn tabIndexDirectionEx(angle: f32, event_num: ?u16, tabidxs: []dvui.TabIndex) void {
+    const cw = currentWindow();
+
+    const unit: dvui.Point.Physical = .{ .x = @cos(angle), .y = @sin(angle) };
+
+    var start_id: dvui.Id = .zero;
+    var start: dvui.Point.Physical = undefined;
+    var start_center: dvui.Point.Physical = undefined;
+    if (focusedWidgetId()) |wid| {
+        // start from focused widget
+        start_id = wid;
+        for (tabidxs) |ti| {
+            if (ti.windowId == cw.subwindows.focused_id and ti.widgetId == wid) {
+                if (ti.rect) |r| {
+                    start = r.center();
+                    start_center = start;
+
+                    // approximate moving start along angle to edge of r
+                    const d = @max(r.w / 2, r.h / 2);
+                    start.x += d * unit.x;
+                    start.y += d * unit.y;
+                    start.x = std.math.clamp(start.x, r.x, r.x + r.w);
+                    start.y = std.math.clamp(start.y, r.y, r.y + r.h);
+
+                    //Path.stroke(.{ .points = &.{start} }, .{ .thickness = 5.0, .color = .red });
+                }
+            }
+        }
+    } else {
+        // start from edge of window opposite direction, as if we are entering
+        // the window moving in that direction
+        var r = dvui.windowRectPixels();
+        if (cw.subwindows.focused()) |sw| r = sw.rect_pixels;
+        start = r.center();
+
+        const d = @max(r.w / 2, r.h / 2);
+        start.x -= d * unit.x;
+        start.y -= d * unit.y;
+        start.x = std.math.clamp(start.x, r.x, r.x + r.w);
+        start.y = std.math.clamp(start.y, r.y, r.y + r.h);
+
+        start_center = start;
+    }
+
+    var min_score: f32 = std.math.floatMax(f32);
+    var min_id: ?dvui.Id = null;
+
+    for (tabidxs) |ti| {
+        if (ti.widgetId == start_id) continue; // skip start
+        if (ti.windowId != cw.subwindows.focused_id) continue; // only widgets in this subwindow
+
+        if (ti.rect) |r| {
+            tabIndexDirScore(unit, start_center, start.diff(start_center), r, ti.widgetId, &min_score, &min_id);
+        }
+    }
+
+    if (min_id) |id| {
+        focusWidget(id, cw.subwindows.focused_id, event_num);
     }
 }
 
@@ -2275,6 +2506,12 @@ pub const TabIndexGroup = struct {
     }
 };
 
+/// Nested group for tab_index navigation.  tab_index controls focus order
+/// within the group. The group as a whole is ordered by its tab_index.
+///
+/// TabIndexGroup is not a widget and does no layout.
+///
+/// Only valid between `Window.begin`and `Window.end`.
 pub fn tabIndexGroup(src: std.builtin.SourceLocation, opts: TabIndexGroup.Options) *TabIndexGroup {
     var ret = widgetAlloc(TabIndexGroup);
     ret.init(src, opts);
@@ -2306,6 +2543,70 @@ pub fn floatingMenu(src: std.builtin.SourceLocation, init_opts: FloatingMenuWidg
     return ret;
 }
 
+/// Show a modal floating menu/window dismissed by escape or clicking outside.
+/// See `popup`.
+pub const Popup = struct {
+    pub const InitOptions = struct {
+        /// If true, popup will show.  Popup will set to false if:
+        /// * escape is pressed
+        /// * click outside the popup
+        /// * code calls
+        open_flag: *bool,
+
+        /// If null, center popup on active subwindow.
+        /// If not null, top left of popup is at this point.
+        from: ?Point.Natural = null,
+    };
+
+    init_opts: InitOptions,
+    menu: ?dvui.MenuWidget = null,
+    floating: dvui.FloatingMenuWidget,
+
+    pub fn active(self: *Popup, src: std.builtin.SourceLocation, init_opts: InitOptions, opts: Options) ?*Popup {
+        self.* = .{
+            .init_opts = init_opts,
+            .floating = undefined,
+        };
+
+        if (!self.init_opts.open_flag.*) {
+            self.deinit();
+            return null;
+        }
+
+        self.menu = @as(dvui.MenuWidget, undefined);
+        self.menu.?.init(src, .{ .dir = .horizontal }, .{ .rect = .{} });
+        self.menu.?.submenus_activated = true;
+        self.floating.init(@src(), .{
+            .style = .popup,
+            .from = if (init_opts.from) |f| .fromPoint(f) else null,
+        }, opts);
+
+        return self;
+    }
+
+    pub fn deinit(self: *Popup) void {
+        defer if (dvui.widgetIsAllocated(self)) dvui.widgetFree(self);
+        defer self.* = undefined;
+
+        if (self.menu) |*m| {
+            self.floating.deinit();
+            if (m.submenus_activated == false) {
+                self.init_opts.open_flag.* = false;
+            }
+            m.deinit();
+        }
+    }
+};
+
+/// Show a modal floating menu/window dismissed by escape or clicking outside.
+///
+/// If init_opts.open_flag.* is true, shows and returns popup.  If dismissed,
+/// sets open_flag.* to false in deinit.
+pub fn popup(src: std.builtin.SourceLocation, init_opts: Popup.InitOptions, opts: Options) ?*Popup {
+    var ret = widgetAlloc(Popup);
+    return ret.active(src, init_opts, opts);
+}
+
 /// Subwindow that the user can generally resize and move around.  Options.rect
 /// will control the initial position/size.
 ///
@@ -2320,8 +2621,25 @@ pub fn floatingWindow(src: std.builtin.SourceLocation, floating_opts: FloatingWi
     return ret;
 }
 
+/// Spawn a new OS Window and subsequent widgets will be drawn on it.
+///
+/// If the backend doesn't support multiple OS windows, it will fallback
+/// to a `dvui.floatingWindow`.
+///
+/// Only valid between `Window.begin` and `Window.end`.
+pub fn osWindow(src: std.builtin.SourceLocation, os_win_opts: OsWindowWidget.InitOptions, win_opts: Window.InitOptions) OsWindowWidget {
+    if (Backend.support_child_os_wins)
+        if (OsWindowWidget.osWindowImpl(src, os_win_opts, win_opts)) |widget| {
+            return widget;
+        };
+    // This will be in the same dvui.Window, so win_opts is basically already "applied". Nice.
+    return OsWindowWidget.osWindowFallback(src, os_win_opts);
+}
+
 /// Normal widgets seen at the top of `floatingWindow`.  Includes a close
-/// button, centered title str, and right_str on the right.
+/// button, title str, and right_str, depends on dvui.Window.button_order:
+/// * .cancel_ok -> close button left, title centered, right_str right
+/// * .ok_cancel -> close button right, title left, right_str left of close
 ///
 /// Handles raising and focusing the subwindow on click.  To make
 /// `floatingWindow` only move on a click-drag in the header, use:
@@ -2331,29 +2649,36 @@ pub fn floatingWindow(src: std.builtin.SourceLocation, floating_opts: FloatingWi
 /// Only valid between `Window.begin`and `Window.end`.
 pub fn windowHeader(str: []const u8, right_str: []const u8, openflag: ?*bool) Rect.Physical {
     var over = dvui.overlay(@src(), .{ .expand = .horizontal, .name = "WindowHeader" });
+    const bo = dvui.currentWindow().button_order;
 
-    dvui.labelNoFmt(@src(), str, .{ .align_x = 0.5 }, .{
+    const align_x: f32 = if (bo == .ok_cancel) 0.0 else 0.5;
+    dvui.labelNoFmt(@src(), str, .{ .align_x = align_x }, .{
         .expand = .horizontal,
         .font = .theme(.heading),
         .padding = .{ .x = 6, .y = 6, .w = 6, .h = 4 },
         .label = .{ .for_id = dvui.subwindowCurrentId() },
     });
 
+    var hbox: ?*BoxWidget = null;
+    if (bo == .ok_cancel) hbox = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_x = 1.0 });
+
     if (openflag) |of| {
-        const opts: Options = .{ .font = .theme(.heading), .corner_radius = Rect.all(1000), .padding = Rect.all(2), .margin = Rect.all(2), .gravity_y = 0.5, .expand = .ratio };
+        const opts: Options = .{ .font = .theme(.heading), .corners = .all(1000), .padding = Rect.all(2), .margin = Rect.all(2), .gravity_y = 0.5, .expand = .ratio, .gravity_x = if (bo == .ok_cancel) 1.0 else 0.0 };
         if (dvui.buttonIcon(
             @src(),
             "close",
             entypo.cross,
             .{},
             .{},
-            opts.themeOverride(null),
+            opts,
         )) {
             of.* = false;
         }
     }
 
-    dvui.labelNoFmt(@src(), right_str, .{}, .{ .gravity_x = 1.0 });
+    dvui.labelNoFmt(@src(), right_str, .{}, .{ .gravity_x = if (bo == .ok_cancel) 0.0 else 1.0 });
+
+    if (hbox) |hb| hb.deinit();
 
     const evts = events();
     for (evts) |*e| {
@@ -2528,7 +2853,7 @@ pub fn dialogDisplay(id: Id) !void {
 
     {
         // Add the buttons at the bottom first, so that they are guaranteed to be shown
-        var hbox = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_x = 0.5, .gravity_y = 1.0 });
+        var hbox = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_x = 1.0, .gravity_y = 1.0, .margin = .all(4) });
         defer hbox.deinit();
 
         if (cancel_label) |cl| {
@@ -2669,7 +2994,8 @@ pub fn toastDisplay(id: Id) !void {
     var animator = dvui.animate(@src(), .{ .kind = .alpha, .duration = 500_000 }, .{ .id_extra = id.asUsize(), .gravity_x = 0.5 });
     defer animator.deinit();
     var label_wd: WidgetData = undefined;
-    dvui.labelNoFmt(@src(), message, .{}, .{ .background = true, .corner_radius = dvui.Rect.all(1000), .padding = .{ .x = 16, .y = 8, .w = 16, .h = 8 }, .data_out = &label_wd });
+
+    dvui.labelNoFmt(@src(), message, .{}, .{ .background = true, .corners = .all(1000), .padding = .{ .x = 16, .y = 8, .w = 16, .h = 8 }, .data_out = &label_wd });
     if (label_wd.accesskit_node()) |ak_node| {
         AccessKit.nodeSetLive(ak_node, AccessKit.Live.polite);
     }
@@ -2850,7 +3176,6 @@ pub fn dropdownEnum(src: std.builtin.SourceLocation, T: type, choice: DropdownCh
 
 pub const SuggestionInitOptions = struct {
     button: bool = false,
-    opened: bool = false,
     open_on_text_change: bool = true,
     open_on_focus: bool = true,
     label: ?Options.LabelOpts = null,
@@ -2863,18 +3188,24 @@ pub const SuggestionInitOptions = struct {
 ///
 /// Only valid between `Window.begin`and `Window.end`.
 pub fn suggestion(te: *TextEntryWidget, init_opts: SuggestionInitOptions) *SuggestionWidget {
-    var open_sug = init_opts.opened;
+    var button_clicked = false;
+
+    const src = @src();
+    const button_id = dvui.parentGet().extendId(src, 0);
 
     if (init_opts.button) {
         if (dvui.buttonIcon(
-            @src(),
+            src,
             "combobox_triangle",
             entypo.chevron_small_down,
             .{},
             .{},
             .{ .expand = .ratio, .margin = dvui.Rect.all(2), .gravity_x = 1.0, .tab_index = 0 },
         )) {
-            open_sug = true;
+            button_clicked = true;
+        }
+
+        if (button_id == dvui.focusedWidgetIdInCurrentSubwindow()) {
             dvui.focusWidget(te.data().id, null, null);
         }
     }
@@ -2886,8 +3217,8 @@ pub fn suggestion(te: *TextEntryWidget, init_opts: SuggestionInitOptions) *Sugge
         .rs = te.data().borderRectScale(),
         .text_entry_id = te.data().id,
     }, .{ .label = .{ .text = te.getText() }, .min_size_content = .{ .w = min_width }, .padding = .{}, .border = te.data().options.borderGet() });
-    if (open_sug) {
-        sug.open();
+    if (button_clicked) {
+        if (sug.willOpen()) sug.close() else sug.open();
     }
 
     // process events from textEntry
@@ -2948,15 +3279,18 @@ pub fn suggestion(te: *TextEntryWidget, init_opts: SuggestionInitOptions) *Sugge
         sug.open();
     }
 
+    const focused_now = dvui.focusedWidgetIdInCurrentSubwindow() == te.data().id;
     if (init_opts.open_on_focus) {
         const focused_last_frame = dvui.dataGet(null, te.data().id, "_focused_last_frame", bool) orelse false;
-        const focused_now = dvui.focusedWidgetIdInCurrentSubwindow() == te.data().id;
 
         if (!focused_last_frame and focused_now) {
             sug.open();
         }
 
         dvui.dataSet(null, te.data().id, "_focused_last_frame", focused_now);
+    }
+    if (!focused_now) {
+        sug.close();
     }
 
     return sug;
@@ -3016,7 +3350,11 @@ pub var expander_defaults: Options = .{
 };
 
 pub const ExpanderOptions = struct {
+    /// true if the expander should start out expanded.
     default_expanded: bool = false,
+
+    /// Allows storing/changing the expanded state externally.
+    expanded: ?*bool = null,
 };
 
 /// Arrow icon and label that remembers if it has been clicked (expanded).
@@ -3032,14 +3370,12 @@ pub fn expander(src: std.builtin.SourceLocation, label_str: []const u8, init_opt
 
     dvui.tabIndexSet(b.data().id, b.data().options.tab_index, b.data().rectScale().r);
 
-    var expanded: bool = init_opts.default_expanded;
-    if (dvui.dataGet(null, b.data().id, "_expand", bool)) |e| {
-        expanded = e;
-    }
+    var expanded_storage: bool = dvui.dataGet(null, b.data().id, "__expand", bool) orelse init_opts.default_expanded;
+    const expanded = init_opts.expanded orelse &expanded_storage;
 
     var hovered: bool = false;
     if (dvui.clicked(b.data(), .{ .hovered = &hovered })) {
-        expanded = !expanded;
+        expanded.* = !expanded.*;
     }
 
     if (b.data().accesskit_node()) |ak_node| {
@@ -3052,7 +3388,7 @@ pub fn expander(src: std.builtin.SourceLocation, label_str: []const u8, init_opt
         b.data().focusBorder();
     }
 
-    if (expanded) {
+    if (expanded.*) {
         icon(@src(), "down_arrow", entypo.triangle_down, .{}, .{ .gravity_y = 0.5, .role = .none });
     } else {
         icon(
@@ -3065,10 +3401,10 @@ pub fn expander(src: std.builtin.SourceLocation, label_str: []const u8, init_opt
     }
     labelNoFmt(@src(), label_str, .{}, options.strip().override(.{ .label = .{ .for_id = b.data().id } }));
 
-    dvui.dataSet(null, b.data().id, "_expand", expanded);
+    dvui.dataSet(null, b.data().id, "__expand", expanded.*);
     // Accessibility TODO: Support expand and collapse actions, but can;t find a way to get it to work.
 
-    return expanded;
+    return expanded.*;
 }
 
 var group_box_defaults: dvui.Options = .{
@@ -3076,7 +3412,7 @@ var group_box_defaults: dvui.Options = .{
     .border = Rect.all(1),
     .padding = Rect.all(6),
     .margin = Rect.all(6),
-    .corner_radius = .{ .x = 3, .y = 3, .w = 3, .h = 3 },
+    .corners = .all(3),
     .role = .group,
 };
 
@@ -3103,8 +3439,8 @@ pub fn groupBox(src: std.builtin.SourceLocation, label_str: []const u8, opts: Op
         if (border.x != border.y or border.y != border.w or border.w != border.h) {
             options.border = Rect.all(@max(border.x, border.y, border.w, border.h));
             b.data().options.border = options.border;
-            dvui.log.debug("groupBox {x} requires uniform borders, border width set to {d}", .{ b.data().id, options.border.?.x });
-            dvui.currentWindow().debug.widget_id = b.data().id;
+            dvui.log.err("groupBox {x} requires uniform borders, border width set to {d}", .{ b.data().id, options.border.?.x });
+            dvui.Debug.errorOutline(b.data().rectScale().r);
         }
     }
 
@@ -3123,7 +3459,7 @@ pub fn groupBox(src: std.builtin.SourceLocation, label_str: []const u8, opts: Op
         labelNoFmt(@src(), label_str, .{ .align_x = 0.5, .align_y = 0.5 }, options.strip().override(.{
             .rect = label_rect,
             .background = options.background,
-            .corner_radius = options.corner_radius,
+            .corners = options.corners,
             .padding = label_padding,
         }));
     }
@@ -3136,7 +3472,7 @@ pub fn groupBox(src: std.builtin.SourceLocation, label_str: []const u8, opts: Op
         defer path.deinit();
 
         const r = wd.borderRectScale().r.insetAll(options.borderGet().x / 2 * rs);
-        const cr = options.corner_radiusGet().scale(rs, Rect.Physical);
+        const cr = options.cornersGet().scale(rs, CornerRect.Physical);
         const left_x = r.x + (options.paddingGet().x + options.borderGet().x / 2) * rs;
         const right_x = @min(
             left_x + text_size.scale(rs, Rect.Physical).w + (label_padding.x + label_padding.w) * rs,
@@ -3144,21 +3480,21 @@ pub fn groupBox(src: std.builtin.SourceLocation, label_str: []const u8, opts: Op
         );
         path.addPoint(.{ .x = left_x, .y = r.y }); // left edge of label
 
-        const tl = dvui.Point.Physical{ .x = r.x + cr.x, .y = r.y + cr.x };
-        path.addArc(tl, cr.x, std.math.pi * 1.5, std.math.pi, false);
+        const tl = dvui.Point.Physical{ .x = r.x + cr.tl.radius(), .y = r.y + cr.tl.radius() };
+        path.addArc(tl, cr.tl.radius(), std.math.pi * 1.5, std.math.pi, false);
 
-        const bl = dvui.Point.Physical{ .x = r.x + cr.x, .y = r.y + r.h - cr.x };
-        path.addArc(bl, cr.x, std.math.pi, std.math.pi * 0.5, false);
+        const bl = dvui.Point.Physical{ .x = r.x + cr.tl.radius(), .y = r.y + r.h - cr.tl.radius() };
+        path.addArc(bl, cr.tl.radius(), std.math.pi, std.math.pi * 0.5, false);
 
-        const br = dvui.Point.Physical{ .x = r.x + r.w - cr.x, .y = r.y + r.h - cr.x };
-        path.addArc(br, cr.x, std.math.pi * 0.5, 0, false);
+        const br = dvui.Point.Physical{ .x = r.x + r.w - cr.tl.radius(), .y = r.y + r.h - cr.tl.radius() };
+        path.addArc(br, cr.tl.radius(), std.math.pi * 0.5, 0, false);
 
-        const tr = dvui.Point.Physical{ .x = r.x + r.w - cr.x, .y = r.y + cr.x };
-        path.addArc(tr, cr.x, std.math.pi * 2, std.math.pi * 1.5, false);
+        const tr = dvui.Point.Physical{ .x = r.x + r.w - cr.tl.radius(), .y = r.y + cr.tl.radius() };
+        path.addArc(tr, cr.tl.radius(), std.math.pi * 2, std.math.pi * 1.5, false);
 
         path.addPoint(.{ .x = right_x, .y = r.y }); // right edge of label
 
-        path.build().stroke(.{ .thickness = options.borderGet().x * rs, .color = dvui.themeGet().border });
+        path.build().stroke(.{ .thickness = options.borderGet().x * rs, .color = .{ .color = dvui.themeGet().border } });
     }
     return b;
 }
@@ -3173,6 +3509,16 @@ pub fn paned(src: std.builtin.SourceLocation, init_opts: PanedWidget.InitOptions
     var ret = widgetAlloc(PanedWidget);
     ret.init(src, init_opts, opts);
     ret.processEvents();
+    return ret;
+}
+
+/// A layout tree of splits and tabbed leaves that panels can be dragged
+/// between. See `DockingWidget` for usage.
+///
+/// Only valid between `Window.begin`and `Window.end`.
+pub fn dockspace(src: std.builtin.SourceLocation, init_opts: DockingWidget.InitOptions, opts: Options) *DockingWidget {
+    var ret = widgetAlloc(DockingWidget);
+    ret.init(src, init_opts, opts);
     return ret;
 }
 
@@ -3202,8 +3548,10 @@ pub fn textLayout(src: std.builtin.SourceLocation, init_opts: TextLayoutWidget.I
     return ret;
 }
 
-/// Context menu.  Pass a screen space pixel rect in `init_opts`, then
-/// `.activePoint()` says whether to show a menu.
+/// Context menu activated by mouse right click and touch "long press" (0.5s).
+///
+/// Pass a screen space pixel rect in `init_opts`, then `.activePoint()` says
+/// whether to show a menu.
 ///
 /// The menu code should happen before `.deinit()`, but don't put regular widgets
 /// directly inside Context.
@@ -3224,9 +3572,14 @@ pub fn context(src: std.builtin.SourceLocation, init_opts: ContextWidget.InitOpt
 /// Only valid between `Window.begin`and `Window.end`.
 pub fn tooltip(src: std.builtin.SourceLocation, init_opts: FloatingTooltipWidget.InitOptions, comptime fmt: []const u8, fmt_args: anytype, opts: Options) void {
     var tt: dvui.FloatingTooltipWidget = undefined;
-    tt.init(src, init_opts, opts.override(.{ .role = .tooltip }));
+    const defaults: Options = .{
+        .role = .tooltip,
+        .padding = Rect.all(6),
+    };
+    const options = defaults.override(opts);
+    tt.init(src, init_opts, options);
     if (tt.shown()) {
-        var tl2 = dvui.textLayout(@src(), .{}, .{ .background = false });
+        var tl2 = dvui.textLayout(@src(), .{}, options.strip());
         tl2.format(fmt, fmt_args, .{});
         tl2.deinit();
         if (tt.data().accesskit_node()) |ak_node| {
@@ -3347,221 +3700,21 @@ pub fn scrollArea(src: std.builtin.SourceLocation, init_opts: ScrollAreaWidget.I
     return ret;
 }
 
-pub fn grid(src: std.builtin.SourceLocation, cols: GridWidget.WidthsOrNum, init_opts: GridWidget.InitOpts, opts: Options) *GridWidget {
+pub fn grid(src: std.builtin.SourceLocation, init_opts: GridWidget.InitOptions, opts: Options) *GridWidget {
     const ret = widgetAlloc(GridWidget);
-    ret.init(src, cols, init_opts, opts);
+    ret.init(src, init_opts, opts);
     return ret;
 }
 
-/// Create either a draggable separator (resize_options != null)
-/// or a standard separator (resize_options = null) for a grid heading.
-pub fn gridHeadingSeparator(resize_options: ?GridWidget.HeaderResizeWidget.InitOptions) void {
-    if (resize_options) |resize_opts| {
-        var handle: GridWidget.HeaderResizeWidget = .init(
-            @src(),
-            .vertical,
-            resize_opts,
-            .{ .gravity_x = 1.0 },
-        );
-        handle.install();
-        handle.processEvents();
-        handle.deinit();
-    } else {
-        _ = separator(@src(), .{ .expand = .vertical, .gravity_x = 1.0 });
-    }
-}
-
-/// Create a heading with a static label
-pub fn gridHeading(
-    src: std.builtin.SourceLocation,
-    g: *GridWidget,
-    col_num: usize,
-    heading: []const u8,
-    resize_opts: ?GridWidget.HeaderResizeWidget.InitOptions,
-    cell_style: anytype, // GridWidget.CellStyle
-) void {
-    const label_defaults: Options = .{
-        .corner_radius = Rect.all(0),
-        .expand = .horizontal,
-        .gravity_x = 0.5,
-        .gravity_y = 0.5,
-        .background = true,
-    };
-    const opts = if (@TypeOf(cell_style) == @TypeOf(.{})) GridWidget.CellStyle.none else cell_style;
-
-    const label_options = label_defaults.override(opts.options(.colRow(col_num, 0)));
-    var cell = g.headerCell(src, col_num, opts.cellOptions(.colRow(col_num, 0)));
-    defer cell.deinit();
-
-    labelNoFmt(@src(), heading, .{}, label_options);
-    gridHeadingSeparator(resize_opts);
-}
-
-/// Create a heading and allow the column to be sorted.
-///
-/// Returns true if the sort direction has changed.
-/// sort_dir is an out parameter containing the current sort direction.
-pub fn gridHeadingSortable(
-    src: std.builtin.SourceLocation,
-    g: *GridWidget,
-    col_num: usize,
-    heading: []const u8,
-    dir: *GridWidget.SortDirection,
-    resize_opts: ?GridWidget.HeaderResizeWidget.InitOptions,
-    cell_style: anytype, // GridWidget.CellStyle
-) bool {
-    const icon_ascending = dvui.entypo.chevron_small_up;
-    const icon_descending = dvui.entypo.chevron_small_down;
-
-    // Pad buttons with extra space if there is no sort indicator.
-    const heading_defaults: Options = .{
-        .expand = .horizontal,
-        .corner_radius = Rect.all(0),
-    };
-    const opts = if (@TypeOf(cell_style) == @TypeOf(.{})) GridWidget.CellStyle.none else cell_style;
-    var heading_opts = heading_defaults.override(opts.options(.col(col_num)));
-    const label_wd: *WidgetData = wd: {
-        if (heading_opts.data_out) |data_out| break :wd data_out;
-
-        var internal_wd: WidgetData = undefined;
-        heading_opts.data_out = &internal_wd;
-        break :wd &internal_wd;
-    };
-
-    var cell = g.headerCell(src, col_num, opts.cellOptions(.col(col_num)));
-    defer cell.deinit();
-
-    gridHeadingSeparator(resize_opts);
-
-    const sort_changed = switch (g.colSortOrder(col_num)) {
-        // Use same src for each button so they get the same id and can retain focus accross frames.
-        .unsorted => button(src, heading, .{}, heading_opts),
-        .ascending => buttonLabelAndIcon(src, .{ .label = heading, .tvg_bytes = icon_ascending, .button_opts = .{} }, heading_opts),
-        .descending => buttonLabelAndIcon(src, .{ .label = heading, .tvg_bytes = icon_descending, .button_opts = .{} }, heading_opts),
-    };
-
-    if (sort_changed) {
-        g.sortChanged(col_num);
-    }
-    dir.* = g.sort_direction;
-
-    if (label_wd.accesskit_node()) |ak_node| {
-        switch (dir.*) {
-            .ascending => AccessKit.nodeSetSortDirection(ak_node, AccessKit.SortDirection.ascending),
-            .descending => AccessKit.nodeSetSortDirection(ak_node, AccessKit.SortDirection.descending),
-            .unsorted => {},
-        }
-    }
-
-    return sort_changed;
-}
-
-/// A grid heading with a checkbox for select-all and select-none
-///
-/// Returns true if the selection state has changed.
-/// selection - out parameter containing the current selection state.
-pub fn gridHeadingCheckbox(
-    src: std.builtin.SourceLocation,
-    g: *GridWidget,
-    col_num: usize,
-    select_state: *selection.SelectAllState,
-    cell_style: anytype, // GridWidget.CellStyle
-) bool {
-    const header_defaults: Options = .{
-        .background = true,
-        .expand = .both,
-        .margin = ButtonWidget.defaults.marginGet(),
-        .gravity_x = 0.5,
-        .gravity_y = 0.5,
-    };
-
-    const opts = if (@TypeOf(cell_style) == @TypeOf(.{})) GridWidget.CellStyle.none else cell_style;
-
-    const header_options = header_defaults.override(opts.options(.col(col_num)));
-    var checkbox_opts: Options = header_options.strip();
-    checkbox_opts.padding = ButtonWidget.defaults.paddingGet();
-    checkbox_opts.gravity_x = header_options.gravity_x;
-    checkbox_opts.gravity_y = header_options.gravity_y;
-    var checkbox_wd: WidgetData = undefined;
-    checkbox_opts.data_out = &checkbox_wd;
-
-    var cell = g.headerCell(src, col_num, opts.cellOptions(.col(col_num)));
-    defer cell.deinit();
-
-    var is_clicked = false;
-    var selected = select_state.* == .select_all;
-    {
-        _ = dvui.separator(@src(), .{ .expand = .vertical, .gravity_x = 1.0 });
-
-        var hbox = dvui.box(@src(), .{ .dir = .horizontal }, header_options);
-        defer hbox.deinit();
-
-        is_clicked = dvui.checkbox(@src(), &selected, null, checkbox_opts);
-    }
-    if (is_clicked) {
-        select_state.* = if (selected) .select_all else .select_none;
-    }
-
-    if (checkbox_wd.accesskit_node()) |ak_node| {
-        AccessKit.nodeSetLabel(ak_node, if (select_state.* == .select_all) "Select none" else "Select all");
-    }
-    return is_clicked;
-}
-
-/// Size columns widths using ratios.
-///
-/// Positive widths are treated as fixed widths and are not modified.
-/// Negative widths are treated as ratios and are replaced by a calculated width.
-/// Results are returned in col_widths, which will always be positive (or zero) values.
-/// If content_width is larger than the grid's visible area, horizontal scrolling should be enabled via the grid's init_opts.
-///
-/// Examples:
-/// To lay out three columns with equal widths, use the same negative ratio for each column:
-///     { -1, -1, -1 } or { -0.33, -0.33, -0.33 }
-/// To make the second column with twice the width of the first, use a negative ratio twice as large.
-///     {-1, -2 } or { -50, -100 }
-/// To lay out a fixed column width with all other columns sharing the remaining, use a positive width for the fixed column and
-/// the same negative ratio for the variable columns.
-///     { -1, 50, -1 }.
-pub fn columnLayoutProportional(ratio_widths: []const f32, col_widths: []f32, content_width: f32) void {
-    const scroll_bar_w: f32 = GridWidget.scrollbar_padding_defaults.w;
-    std.debug.assert(ratio_widths.len == col_widths.len); // input and output slices must be the same length
-
-    // Count all of the positive widths as reserved widths.
-    // Total all of the negative widths.
-    const reserved_w, const ratio_w_total: f32 = blk: {
-        var res_width: f32 = 0;
-        var total_ratio_w: f32 = 0;
-        for (ratio_widths) |w| {
-            if (w <= 0) {
-                total_ratio_w += -w;
-            } else {
-                res_width += w;
-            }
-        }
-        break :blk .{ res_width, total_ratio_w };
-    };
-    const available_w = content_width - reserved_w - scroll_bar_w;
-
-    // For each negative width, replace it width a positive calculated width.
-    for (col_widths, ratio_widths) |*col_w, ratio_w| {
-        if (ratio_w <= 0) {
-            col_w.* = -ratio_w / ratio_w_total * available_w;
-        } else {
-            col_w.* = ratio_w;
-        }
-    }
-}
-
 /// Widget for making thin lines to visually separate other widgets.  Use
-/// .min_size_content to control size.
+/// .min_size_content to control size.  Good for horizontal rule (or vertical).
 ///
 /// Only valid between `Window.begin`and `Window.end`.
 pub fn separator(src: std.builtin.SourceLocation, opts: Options) WidgetData {
     const defaults: Options = .{
         .name = "Separator",
         .background = true, // TODO: remove this when border and background are no longer coupled
-        .color_fill = dvui.themeGet().border,
+        .color_fill = .{ .color = dvui.themeGet().border },
         .min_size_content = .{ .w = 1, .h = 1 },
     };
 
@@ -3632,7 +3785,7 @@ pub fn spinner(src: std.builtin.SourceLocation, opts: Options) void {
     const end = full_circle * easing.inSine(t);
 
     path.addArc(r.center(), @min(r.w, r.h) / 3, start, end, false);
-    path.build().stroke(.{ .thickness = 3.0 * rs.s, .color = options.color(.text) });
+    path.build().stroke(.{ .thickness = 3.0 * rs.s, .color = .{ .color = options.color(.text).toColor() } });
 }
 
 pub fn scale(src: std.builtin.SourceLocation, init_opts: ScaleWidget.InitOptions, opts: Options) *ScaleWidget {
@@ -3712,7 +3865,7 @@ pub const LinkOptions = struct {
 
 /// A label that calls `openURL` when clicked.
 pub fn link(src: std.builtin.SourceLocation, init_opts: LinkOptions, opts: Options) void {
-    const defaults: Options = .{ .color_text = dvui.themeGet().focus };
+    const defaults: Options = .{ .color_text = .{ .color = dvui.themeGet().focus }, .font = dvui.Font.theme(.body).withUnderline(.{}) };
     var click_event: dvui.Event.EventTypes = undefined;
     if (dvui.labelClick(src, "{s}", .{init_opts.label orelse init_opts.url}, .{ .click_event = &click_event }, defaults.override(opts))) {
         const new_window = (click_event == .mouse and (click_event.mouse.button == .middle or click_event.mouse.mod.matchBind("ctrl/cmd")));
@@ -3879,7 +4032,7 @@ pub fn image(src: std.builtin.SourceLocation, init_opts: ImageInitOptions, opts:
     // rect is the content rect, so expand to the whole rect
     wd.rect = rect.outset(wd.options.paddingGet()).outset(wd.options.borderGet()).outset(wd.options.marginGet());
 
-    var renderBackground: ?Color = if (wd.options.backgroundGet()) wd.options.color(.fill) else null;
+    var renderBackground: ?Color = if (wd.options.backgroundGet()) wd.options.color(.fill).toColor() else null;
 
     if (wd.options.rotationGet() == 0.0) {
         wd.borderAndBackground(.{});
@@ -3891,7 +4044,7 @@ pub fn image(src: std.builtin.SourceLocation, init_opts: ImageInitOptions, opts:
     }
     const render_tex_opts = RenderTextureOptions{
         .rotation = wd.options.rotationGet(),
-        .corner_radius = wd.options.corner_radiusGet(),
+        .corners = wd.options.cornersGet(),
         .uv = init_opts.uv,
         .background_color = renderBackground,
     };
@@ -3929,7 +4082,7 @@ pub fn debugFontAtlases(src: std.builtin.SourceLocation, opts: Options) void {
     wd.borderAndBackground(.{});
 
     var rs = wd.parent.screenRectScale(placeIn(wd.contentRect(), size, .none, opts.gravityGet()));
-    const color = opts.color(.text);
+    const color = opts.color(.text).toColor();
 
     it = cw.fonts.cache.iterator();
     while (it.next()) |kv| {
@@ -4004,10 +4157,12 @@ pub fn buttonIcon(src: std.builtin.SourceLocation, name: []const u8, tvg_bytes: 
 }
 
 pub const ButtonLabelAndIconOptions = struct {
-    button_opts: ButtonWidget.InitOptions,
+    button_opts: ButtonWidget.InitOptions = .{},
     label: []const u8,
     tvg_bytes: []const u8,
     icon_first: bool = false,
+    // Best practice is to supply an icon label for accessibility.
+    icon_label: ?[]const u8 = null,
 };
 
 pub fn buttonLabelAndIcon(src: std.builtin.SourceLocation, combined_opts: ButtonLabelAndIconOptions, opts: Options) bool {
@@ -4022,9 +4177,9 @@ pub fn buttonLabelAndIcon(src: std.builtin.SourceLocation, combined_opts: Button
     // draw background/border
     bw.drawBackground();
     {
-        var outer_hbox = box(src, .{ .dir = .horizontal }, .{ .expand = .horizontal });
+        var outer_hbox = box(src, .{ .dir = .horizontal }, .{ .expand = .horizontal, .gravity_y = 0.5 });
         defer outer_hbox.deinit();
-        icon(@src(), combined_opts.label, combined_opts.tvg_bytes, .{}, options.strip().override(.{ .gravity_x = if (combined_opts.icon_first) 0.0 else 1.0, .color_text = opts.color_text }));
+        icon(@src(), combined_opts.icon_label orelse combined_opts.label, combined_opts.tvg_bytes, .{}, options.strip().override(.{ .gravity_x = if (combined_opts.icon_first) 0.0 else 1.0, .color_text = opts.color_text }));
         labelEx(@src(), "{s}", .{combined_opts.label}, .{ .align_x = 0.5 }, options.strip().override(.{ .expand = .both }));
     }
 
@@ -4147,15 +4302,23 @@ pub fn slider(src: std.builtin.SourceLocation, init_opts: SliderInitOptions, opt
             .key => |ke| {
                 if (ke.action == .down or ke.action == .repeat) {
                     switch (ke.code) {
-                        .left, .down => {
-                            e.handle(@src(), b.data());
-                            init_opts.fraction.* = @max(0, @min(1, init_opts.fraction.* - 0.05));
-                            ret = true;
+                        .left, .down => |ld| {
+                            if ((ld == .left and init_opts.dir == .horizontal) or
+                                (ld == .down and init_opts.dir == .vertical))
+                            {
+                                e.handle(@src(), b.data());
+                                init_opts.fraction.* = @max(0, @min(1, init_opts.fraction.* - 0.05));
+                                ret = true;
+                            }
                         },
-                        .right, .up => {
-                            e.handle(@src(), b.data());
-                            init_opts.fraction.* = @max(0, @min(1, init_opts.fraction.* + 0.05));
-                            ret = true;
+                        .right, .up => |ru| {
+                            if ((ru == .right and init_opts.dir == .horizontal) or
+                                (ru == .up and init_opts.dir == .vertical))
+                            {
+                                e.handle(@src(), b.data());
+                                init_opts.fraction.* = @max(0, @min(1, init_opts.fraction.* + 0.05));
+                                ret = true;
+                            }
                         },
                         else => {},
                     }
@@ -4187,7 +4350,7 @@ pub fn slider(src: std.builtin.SourceLocation, init_opts: SliderInitOptions, opt
         },
     }
     if (b.data().visible()) {
-        part.fill(options.corner_radiusGet().scale(trackrs.s, Rect.Physical), .{ .color = init_opts.color_bar orelse dvui.themeGet().color(.highlight, .fill), .fade = 1.0 });
+        part.fill(options.cornersGet().scale(trackrs.s, CornerRect.Physical), .{ .color = .{ .color = init_opts.color_bar orelse dvui.themeGet().color(.highlight, .fill) }, .fade = 1.0 });
     }
 
     switch (init_opts.dir) {
@@ -4201,7 +4364,7 @@ pub fn slider(src: std.builtin.SourceLocation, init_opts: SliderInitOptions, opt
         },
     }
     if (b.data().visible()) {
-        part.fill(options.corner_radiusGet().scale(trackrs.s, Rect.Physical), .{ .color = options.color(.fill), .fade = 1.0 });
+        part.fill(options.cornersGet().scale(trackrs.s, CornerRect.Physical), .{ .color = options.color(.fill), .fade = 1.0 });
     }
 
     const knobRect = switch (init_opts.dir) {
@@ -4209,15 +4372,15 @@ pub fn slider(src: std.builtin.SourceLocation, init_opts: SliderInitOptions, opt
         .vertical => Rect{ .y = (br.h - knobsize) * (1 - perc), .w = knobsize, .h = knobsize },
     };
 
-    const fill_color: Color = if (captured(b.data().id))
+    const hover_t = hoverFade(b.data().id, hovered);
+    const fill_color: ColorOrGradient = if (captured(b.data().id))
         options.color(.fill_press)
-    else if (hovered)
-        options.color(.fill_hover)
     else
-        options.color(.fill);
+        options.color(.fill).lerp(options.color(.fill_hover), hover_t);
 
     var knob: BoxWidget = undefined;
-    knob.init(@src(), .{ .dir = .horizontal }, .{ .rect = knobRect, .padding = .{}, .margin = .{}, .background = true, .border = Rect.all(1), .corner_radius = Rect.all(100), .color_fill = fill_color });
+    knob.init(@src(), .{ .dir = .horizontal }, .{ .rect = knobRect, .padding = .{}, .margin = .{}, .background = true, .border = Rect.all(1), .corners = .all(100), .color_fill = fill_color });
+
     knob.drawBackground();
     if (b.data().id == focusedWidgetId()) {
         knob.data().focusBorder();
@@ -4235,7 +4398,7 @@ pub var slider_entry_defaults: Options = .{
     .name = "SliderEntry",
     .role = .slider,
     .margin = Rect.all(4),
-    .corner_radius = dvui.Rect.all(2),
+    .corners = .all(2),
     .padding = Rect.all(2),
     .background = true,
     // min size calculated from font
@@ -4266,7 +4429,7 @@ pub fn sliderEntry(src: std.builtin.SourceLocation, comptime label_fmt: ?[]const
     const exp_stretch = 0.02;
     const key_percentage = 0.05;
 
-    var options = slider_entry_defaults.themeOverride(opts.theme).min_sizeM(10, 1).override(opts);
+    var options = slider_entry_defaults.min_sizeM(10, 1).override(opts);
 
     var ret = false;
     var hover = false;
@@ -4307,8 +4470,8 @@ pub fn sliderEntry(src: std.builtin.SourceLocation, comptime label_fmt: ?[]const
 
     if (text_mode) {
         var te_buf = dataGetSlice(null, b.data().id, "_buf", []u8) orelse blk: {
-            var buf = [_]u8{0} ** 20;
-            _ = std.fmt.bufPrintZ(&buf, "{d:0.3}", .{init_opts.value.*}) catch {};
+            var buf: [20]u8 = @splat(0);
+            _ = std.fmt.bufPrintSentinel(&buf, "{d:0.3}", .{init_opts.value.*}, 0) catch {};
             dataSetSlice(null, b.data().id, "_buf", &buf);
             break :blk dataGetSlice(null, b.data().id, "_buf", []u8).?;
         };
@@ -4419,7 +4582,7 @@ pub fn sliderEntry(src: std.builtin.SourceLocation, comptime label_fmt: ?[]const
                             dataSet(null, b.data().id, "_start_v", init_opts.value.*);
 
                             if (me.button.touch()) {
-                                dvui.dragPreStart(me.p, .{});
+                                dvui.dragPreStart(me.button, me.p, .{});
                             } else {
                                 // Only start tracking the position on press if this
                                 // is not a touch to prevent the value from
@@ -4552,7 +4715,8 @@ pub fn sliderEntry(src: std.builtin.SourceLocation, comptime label_fmt: ?[]const
             }
         }
 
-        b.data().borderAndBackground(.{ .fill_color = if (hover) b.data().options.color(.fill_hover) else b.data().options.color(.fill) });
+        const hover_t = hoverFade(b.data().id, hover);
+        b.data().borderAndBackground(.{ .fill_color = b.data().options.color(.fill).lerp(b.data().options.color(.fill_hover), hover_t) });
 
         // only draw handle if we have a min and max
         if (b.data().visible() and init_opts.min != null and init_opts.max != null) {
@@ -4560,7 +4724,7 @@ pub fn sliderEntry(src: std.builtin.SourceLocation, comptime label_fmt: ?[]const
             const knobRect = Rect{ .x = (br.w - knobsize) * math.clamp(how_far, 0, 1), .w = knobsize, .h = knobsize };
             const knobrs = b.widget().screenRectScale(knobRect);
 
-            knobrs.r.fill(options.corner_radiusGet().scale(knobrs.s, Rect.Physical), .{ .color = options.color(.fill_press), .fade = 1.0 });
+            knobrs.r.fill(options.cornersGet().scale(knobrs.s, CornerRect.Physical), .{ .color = options.color(.fill_press), .fade = 1.0 });
         }
 
         const label_opts = options.strip().override(.{ .gravity_x = 0.5, .gravity_y = 0.5 });
@@ -4679,8 +4843,8 @@ pub fn progress(src: std.builtin.SourceLocation, init_opts: Progress_InitOptions
     defer b.deinit();
 
     const rs = b.data().contentRectScale();
-
-    rs.r.fill(options.corner_radiusGet().scale(rs.s, Rect.Physical), .{ .color = options.color(.fill), .fade = 1.0 });
+    const corner = options.cornersGet().finalize(opts.theme).scale(rs.s, CornerRect.Physical);
+    rs.r.fill(corner, .{ .color = options.color(.fill), .fade = 1.0 });
 
     const perc = @max(0, @min(1, init_opts.percent));
     if (perc == 0) return;
@@ -4696,7 +4860,7 @@ pub fn progress(src: std.builtin.SourceLocation, init_opts: Progress_InitOptions
             part.h = rs.r.h - h;
         },
     }
-    part.fill(options.corner_radiusGet().scale(rs.s, Rect.Physical), .{ .color = init_opts.color orelse dvui.themeGet().color(.highlight, .fill), .fade = 1.0 });
+    part.fill(corner, .{ .color = .{ .color = init_opts.color orelse dvui.themeGet().color(.highlight, .fill) }, .fade = 1.0 });
 
     if (b.data().accesskit_node()) |ak_node| {
         AccessKit.nodeSetMinNumericValue(ak_node, 0);
@@ -4708,16 +4872,12 @@ pub fn progress(src: std.builtin.SourceLocation, init_opts: Progress_InitOptions
 pub var checkbox_defaults: Options = .{
     .name = "Checkbox",
     .role = .check_box,
-    .corner_radius = dvui.Rect.all(2),
+    .corners = .all(2),
     .padding = Rect.all(6),
 };
 
 pub fn checkbox(src: std.builtin.SourceLocation, target: *bool, label_str: ?[]const u8, opts: Options) bool {
-    return checkboxEx(src, target, label_str, .{}, opts);
-}
-
-pub fn checkboxEx(src: std.builtin.SourceLocation, target: *bool, label_str: ?[]const u8, sel_opts: selection.SelectOptions, opts: Options) bool {
-    const options = checkbox_defaults.themeOverride(opts.theme).override(opts);
+    const options = checkbox_defaults.override(opts);
     var ret = false;
 
     var b = box(src, .{ .dir = .horizontal }, options);
@@ -4729,9 +4889,6 @@ pub fn checkboxEx(src: std.builtin.SourceLocation, target: *bool, label_str: ?[]
     if (dvui.clicked(b.data(), .{ .hovered = &hovered })) {
         target.* = !target.*;
         ret = true;
-        if (sel_opts.selection_info) |sel_info| {
-            sel_info.add(sel_opts.selection_id, target.*, b.data());
-        }
     }
 
     if (b.data().accesskit_node()) |ak_node| {
@@ -4744,11 +4901,12 @@ pub fn checkboxEx(src: std.builtin.SourceLocation, target: *bool, label_str: ?[]
     const s = spacer(@src(), .{ .min_size_content = Size.all(check_size), .gravity_y = 0.5 });
 
     const rs = s.borderRectScale();
+    const hover_t = dvui.hoverFade(b.data().id, hovered);
 
     if (b.data().visible()) {
         const focused = b.data().id == dvui.focusedWidgetId();
         const pressed = dvui.captured(b.data().id);
-        checkmark(target.*, focused, rs, pressed, hovered, options);
+        checkmark(target.*, focused, rs, pressed, hover_t, options);
     }
 
     if (label_str) |str| {
@@ -4759,27 +4917,21 @@ pub fn checkboxEx(src: std.builtin.SourceLocation, target: *bool, label_str: ?[]
     return ret;
 }
 
-pub fn checkmark(checked: bool, focused: bool, rs: RectScale, pressed: bool, hovered: bool, opts: Options) void {
-    const cornerRad = opts.corner_radiusGet().scale(rs.s, Rect.Physical);
+pub fn checkmark(checked: bool, focused: bool, rs: RectScale, pressed: bool, hover_t: f32, opts: Options) void {
+    const cornerRad = opts.cornersGet().finalize(opts.theme).scale(rs.s, CornerRect.Physical);
     rs.r.fill(cornerRad, .{ .color = opts.color(.border), .fade = 1.0 });
 
     if (focused) {
-        rs.r.stroke(cornerRad, .{ .thickness = 2 * rs.s, .color = dvui.themeGet().focus });
-    }
-
-    var fill: Options.ColorAsk = .fill;
-    if (pressed) {
-        fill = .fill_press;
-    } else if (hovered) {
-        fill = .fill_hover;
+        rs.r.stroke(cornerRad, .{ .thickness = 2 * rs.s, .color = .{ .color = dvui.themeGet().focus } });
     }
 
     var options = opts;
+    if (checked) options.style = .highlight;
+    const fill = if (pressed) options.color(.fill_press) else options.color(.fill).lerp(options.color(.fill_hover), hover_t);
     if (checked) {
-        options.style = .highlight;
-        rs.r.insetAll(0.5 * rs.s).fill(cornerRad, .{ .color = options.color(fill), .fade = 1.0 });
+        rs.r.insetAll(0.5 * rs.s).fill(cornerRad, .{ .color = fill, .fade = 1.0 });
     } else {
-        rs.r.insetAll(rs.s).fill(cornerRad, .{ .color = options.color(fill), .fade = 1.0 });
+        rs.r.insetAll(rs.s).fill(cornerRad, .{ .color = fill, .fade = 1.0 });
     }
 
     if (checked) {
@@ -4806,12 +4958,12 @@ pub fn checkmark(checked: bool, focused: bool, rs: RectScale, pressed: bool, hov
 pub var radio_defaults: Options = .{
     .name = "Radio",
     .role = .radio_button,
-    .corner_radius = dvui.Rect.all(2),
+    .corners = .all(2),
     .padding = Rect.all(6),
 };
 
 pub fn radio(src: std.builtin.SourceLocation, active: bool, label_str: ?[]const u8, opts: Options) bool {
-    const options = radio_defaults.themeOverride(opts.theme).override(opts);
+    const options = radio_defaults.override(opts);
     var ret = false;
 
     var b = box(src, .{ .dir = .horizontal }, options);
@@ -4834,11 +4986,12 @@ pub fn radio(src: std.builtin.SourceLocation, active: bool, label_str: ?[]const 
     const s = spacer(@src(), .{ .min_size_content = Size.all(radio_size), .gravity_y = 0.5 });
 
     const rs = s.borderRectScale();
+    const hover_t = dvui.hoverFade(b.data().id, hovered);
 
     if (b.data().visible()) {
         const focused = b.data().id == dvui.focusedWidgetId();
         const pressed = dvui.captured(b.data().id);
-        radioCircle(active or ret, focused, rs, pressed, hovered, options);
+        radioCircle(active or ret, focused, rs, pressed, hover_t, options);
     }
 
     if (label_str) |str| {
@@ -4849,28 +5002,22 @@ pub fn radio(src: std.builtin.SourceLocation, active: bool, label_str: ?[]const 
     return ret;
 }
 
-pub fn radioCircle(active: bool, focused: bool, rs: RectScale, pressed: bool, hovered: bool, opts: Options) void {
-    const cornerRad = Rect.Physical.all(1000);
+pub fn radioCircle(active: bool, focused: bool, rs: RectScale, pressed: bool, hover_t: f32, opts: Options) void {
+    const cornerRad = CornerRect.Physical.round(1000);
     const r = rs.r;
     r.fill(cornerRad, .{ .color = opts.color(.border), .fade = 1.0 });
 
     if (focused) {
-        r.stroke(cornerRad, .{ .thickness = 2 * rs.s, .color = dvui.themeGet().focus });
-    }
-
-    var fill: Options.ColorAsk = .fill;
-    if (pressed) {
-        fill = .fill_press;
-    } else if (hovered) {
-        fill = .fill_hover;
+        r.stroke(cornerRad, .{ .thickness = 2 * rs.s, .color = .{ .color = dvui.themeGet().focus } });
     }
 
     var options = opts;
+    if (active) options.style = .highlight;
+    const fill = if (pressed) options.color(.fill_press) else options.color(.fill).lerp(options.color(.fill_hover), hover_t);
     if (active) {
-        options.style = .highlight;
-        r.insetAll(0.5 * rs.s).fill(cornerRad, .{ .color = options.color(fill), .fade = 1.0 });
+        r.insetAll(0.5 * rs.s).fill(cornerRad, .{ .color = fill, .fade = 1.0 });
     } else {
-        r.insetAll(rs.s).fill(cornerRad, .{ .color = opts.color(fill), .fade = 1.0 });
+        r.insetAll(rs.s).fill(cornerRad, .{ .color = fill, .fade = 1.0 });
     }
 
     if (active) {
@@ -4958,6 +5105,7 @@ pub fn TextEntryNumberInitOptions(comptime T: type) type {
         value: ?*T = null,
         show_min_max: bool = false,
         text: ?[]const u8 = null,
+        text_limit: ?u8 = null,
         placeholder: ?[]const u8 = null,
     };
 }
@@ -4995,8 +5143,10 @@ pub fn textEntryNumber(src: std.builtin.SourceLocation, comptime T: type, init_o
     // @typeName is needed so that the id changes with the type for `data...` functions
     // https://github.com/david-vanderson/dvui/issues/502
     const id = dvui.parentGet().extendId(src, opts.idExtra()).update(@typeName(T));
+    const backing_buffer: [30]u8 = @splat(0);
+    const text_limit = init_opts.text_limit orelse 30;
 
-    const buffer = dataGetSliceDefault(null, id, "buffer", []u8, &[_]u8{0} ** 32);
+    const buffer = dataGetSliceDefault(null, id, "_buffer", []u8, &backing_buffer)[0..@min(text_limit, backing_buffer.len)];
 
     // always initialize with value so we do the dataGet
     if (init_opts.value) |num| {
@@ -5004,7 +5154,13 @@ pub fn textEntryNumber(src: std.builtin.SourceLocation, comptime T: type, init_o
         if (old_value == null or old_value.? != num.*) {
             dataSet(null, id, "value", num.*);
             @memset(buffer, 0); // clear out anything that was there before
-            _ = std.fmt.bufPrint(buffer, "{d}", .{num.*}) catch unreachable;
+            _ = std.fmt.bufPrint(buffer, "{d}", .{num.*}) catch {
+                @memset(buffer, 0); // clear out anything that was there before
+                switch (@typeInfo(T)) {
+                    .float, .comptime_float => _ = std.fmt.bufPrint(buffer, "{e}", .{num.*}) catch unreachable,
+                    else => unreachable,
+                }
+            };
         }
     }
 
@@ -5021,11 +5177,18 @@ pub fn textEntryNumber(src: std.builtin.SourceLocation, comptime T: type, init_o
         }
     }
 
+    const font = default_opts.override(opts).fontGet();
+    var limit_size: ?Size = null;
+    if (init_opts.text_limit) |limit| {
+        limit_size = font.sizeM(limit, 1);
+    }
+    const options = default_opts.override(.{ .min_size_content = limit_size }).override(opts);
+
     var te: TextEntryWidget = undefined;
     te.init(src, .{
         .text = .{ .buffer = buffer },
         .placeholder = init_opts.placeholder orelse if (init_opts.show_min_max) minmax_text else null,
-    }, default_opts.override(opts));
+    }, options);
 
     // if text was given, act like the user deleted everything and typed this
     if (init_opts.text) |text| {
@@ -5071,7 +5234,7 @@ pub fn textEntryNumber(src: std.builtin.SourceLocation, comptime T: type, init_o
 
     if (result.value != .Valid and (init_opts.value != null or result.value != .Empty)) {
         const rs = te.data().borderRectScale();
-        rs.r.outsetAll(1).stroke(te.data().options.corner_radiusGet().scale(rs.s, Rect.Physical), .{ .thickness = 3 * rs.s, .color = dvui.themeGet().err.fill orelse .red, .after = true });
+        rs.r.outsetAll(1).stroke(te.data().options.cornersGet().scale(rs.s, CornerRect.Physical), .{ .thickness = 3 * rs.s, .color = .{ .color = dvui.themeGet().err.fill orelse .red }, .after = true });
     }
 
     if (te.data().accesskit_node()) |ak_node| {
@@ -5166,7 +5329,8 @@ pub fn textEntryColor(src: std.builtin.SourceLocation, init_opts: TextEntryColor
 
     const id = dvui.parentGet().extendId(src, opts.idExtra());
 
-    const buffer = dataGetSliceDefault(null, id, "buffer", []u8, &[_]u8{0} ** 9);
+    const default_bytes: [9]u8 = @splat(0);
+    const buffer = dataGetSliceDefault(null, id, "buffer", []u8, &default_bytes);
 
     var te: TextEntryWidget = undefined;
     te.init(src, .{ .text = .{ .buffer = buffer }, .placeholder = init_opts.placeholder }, options);
@@ -5235,7 +5399,7 @@ pub fn textEntryColor(src: std.builtin.SourceLocation, init_opts: TextEntryColor
 
     if (result.value != .Valid and (init_opts.value != null or result.value != .Empty)) {
         const rs = te.data().borderRectScale();
-        rs.r.outsetAll(1).stroke(te.data().options.corner_radiusGet().scale(rs.s, Rect.Physical), .{ .thickness = 3 * rs.s, .color = dvui.themeGet().err.fill orelse .red, .after = true });
+        rs.r.outsetAll(1).stroke(te.data().options.cornersGet().scale(rs.s, CornerRect.Physical), .{ .thickness = 3 * rs.s, .color = .{ .color = dvui.themeGet().err.fill orelse .red }, .after = true });
     }
 
     te.deinit();
@@ -5269,10 +5433,10 @@ pub fn colorPicker(src: std.builtin.SourceLocation, init_opts: ColorPickerInitOp
     const slider_expand = Options.Expand.fromDirection(.horizontal);
     switch (init_opts.sliders) {
         .rgb => {
-            var r = @as(f32, @floatFromInt(rgb.r));
-            var g = @as(f32, @floatFromInt(rgb.g));
-            var b = @as(f32, @floatFromInt(rgb.b));
-            var a = @as(f32, @floatFromInt(rgb.a));
+            var r: f32 = rgb.r;
+            var g: f32 = rgb.g;
+            var b: f32 = rgb.b;
+            var a: f32 = rgb.a;
 
             var slider_changed = false;
             if (dvui.sliderEntry(@src(), "R: {d:0.0}", .{ .value = &r, .min = 0, .max = 255, .interval = 1 }, .{ .expand = slider_expand })) {
@@ -5288,7 +5452,7 @@ pub fn colorPicker(src: std.builtin.SourceLocation, init_opts: ColorPickerInitOp
                 slider_changed = true;
             }
             if (slider_changed) {
-                init_opts.hsv.* = .fromColor(.{ .r = @intFromFloat(r), .g = @intFromFloat(g), .b = @intFromFloat(b), .a = @intFromFloat(a) });
+                init_opts.hsv.* = .fromColor(.{ .r = @trunc(r), .g = @trunc(g), .b = @trunc(b), .a = @trunc(a) });
                 changed = true;
             }
         },
@@ -5323,11 +5487,22 @@ pub fn colorPicker(src: std.builtin.SourceLocation, init_opts: ColorPickerInitOp
 pub const Picture = struct {
     r: Rect.Physical, // pixels captured
     texture: dvui.TextureTarget,
-    target: dvui.RenderTarget,
+    prev_target: dvui.RenderTarget,
+
+    /// Uses `arena` allocator
+    render_cmds: *std.ArrayList(dvui.RenderCommand),
+    /// Uses `arena` allocator
+    render_cmds_after: *std.ArrayList(dvui.RenderCommand),
+
+    prev_dr_cmds: ?*std.ArrayList(dvui.RenderCommand),
+    prev_dr_cmds_after: ?*std.ArrayList(dvui.RenderCommand),
 
     /// Begin recording drawing to the physical pixels in rect (enlarged to pixel boundaries).
     ///
-    /// Returns null in case of failure (e.g. if backend does not support texture targets, if the passed rect is empty ...).
+    /// Returns null in case of failure:
+    /// * backend does not support texture targets
+    /// * passed rect is empty
+    /// * out of memory
     ///
     /// Only valid between `Window.begin`and `Window.end`.
     pub fn start(rect: Rect.Physical) ?Picture {
@@ -5335,6 +5510,16 @@ pub const Picture = struct {
             //log.err("Picture.start() was called with an empty rect", .{});
             return null;
         }
+
+        // insert queues to catch stuff like stroke after renders
+        const cw = dvui.currentWindow();
+        const prev_dr_cmds = cw.defer_render_cmds;
+        const prev_dr_cmds_after = cw.defer_render_cmds_after;
+        // allocate here to return null before we create a target texture
+        const render_cmds = cw.arena().create(std.ArrayList(dvui.RenderCommand)) catch return null;
+        const render_cmds_after = cw.arena().create(std.ArrayList(dvui.RenderCommand)) catch return null;
+        render_cmds.* = .empty;
+        render_cmds_after.* = .empty;
 
         var r = rect;
         // enlarge texture to pixels boundaries
@@ -5348,19 +5533,37 @@ pub const Picture = struct {
         r.y = y_start;
         r.h = @round(y_end - y_start);
 
-        const texture = dvui.textureCreateTarget(@intFromFloat(r.w), @intFromFloat(r.h), .linear, .rgba_32) catch return null;
+        const texture = dvui.textureCreateTarget(.{ .width = @trunc(r.w), .height = @trunc(r.h) }) catch return null;
+
         const target = dvui.renderTarget(.{ .texture = texture, .offset = r.topLeft() });
+
+        // everything looks good, install our render queues
+        cw.defer_render_cmds = render_cmds;
+        cw.defer_render_cmds_after = render_cmds_after;
 
         return .{
             .r = r,
             .texture = texture,
-            .target = target,
+            .prev_target = target,
+            .prev_dr_cmds = prev_dr_cmds,
+            .prev_dr_cmds_after = prev_dr_cmds_after,
+            .render_cmds = render_cmds,
+            .render_cmds_after = render_cmds_after,
         };
     }
 
     /// Stop recording.
     pub fn stop(self: *Picture) void {
-        _ = dvui.renderTarget(self.target);
+        // restore previous queues
+        const cw = dvui.currentWindow();
+        cw.defer_render_cmds = self.prev_dr_cmds;
+        cw.defer_render_cmds_after = self.prev_dr_cmds_after;
+
+        // force all deferred rendering now
+        cw.renderCommands(self.render_cmds.items) catch {};
+        cw.renderCommands(self.render_cmds_after.items) catch {};
+
+        _ = dvui.renderTarget(self.prev_target);
     }
 
     /// Encode texture as png.  Call after `stop` before `deinit`.
@@ -5504,6 +5707,205 @@ pub fn structUI(src: std.builtin.SourceLocation, comptime field_name: ?[]const u
     const struct_box = struct_ui.displayStruct(@src(), field_name, struct_ptr, depth, .default, struct_options, null);
     if (struct_box) |b| b.deinit();
 }
+
+/// Used with TreeSitter
+pub const SyntaxHighlight = struct {
+    /// Should match the "@" name in the tree sitter queries.
+    name: []const u8,
+    /// This is returned by ParseIterator.next if name matches the query.
+    opts: dvui.Options,
+};
+
+pub const TreeSitter = if (dvui.useTreeSitter) struct {
+    language: *dvui.c.TSLanguage,
+    queries: []const u8,
+    highlights: []const SyntaxHighlight,
+    /// If true dump all captures to dvui.log.debug
+    log_captures: bool = false,
+
+    pub const ParseIterator = struct {
+        const Match = struct {
+            iter: *const ParseIterator,
+            node: dvui.c.TSNode,
+            capture_index: u32,
+
+            pub fn captureName(self: *const Match) []const u8 {
+                var len: u32 = undefined;
+                const name = dvui.c.ts_query_capture_name_for_id(self.iter.parser.query, self.capture_index, &len);
+                return name[0..len];
+            }
+
+            pub fn debugLog(self: *const Match, comptime kind: []const u8) void {
+                const start = dvui.c.ts_node_start_byte(self.node);
+                const end = dvui.c.ts_node_end_byte(self.node);
+                dvui.log.debug(kind ++ " capture @{s} : {s}", .{ self.captureName(), self.iter.text[start..end] });
+            }
+        };
+
+        ts: *const TreeSitter,
+        parser: *Parser,
+        text: []const u8,
+        query_cursor: *dvui.c.TSQueryCursor,
+        first: bool = true,
+        // used to output text that's not highlighted
+        start: usize = 0,
+        debug: bool = false,
+        cur_match: ?Match = null,
+        prev_match: ?Match = null,
+
+        pub fn deinit(self: *ParseIterator) void {
+            dvui.c.ts_query_cursor_delete(self.query_cursor);
+        }
+
+        /// Needed if the text has changed.  Call before calling `next`.  If edit is not null do a partial reparse.
+        pub fn reparse(self: *ParseIterator, edit: ?dvui.c.TSInputEdit) void {
+            if (edit) |e| {
+                dvui.c.ts_tree_edit(self.parser.tree, &e);
+
+                const tree = dvui.c.ts_parser_parse_string(self.parser.parser, self.parser.tree, self.text.ptr, @intCast(self.text.len));
+                dvui.c.ts_tree_delete(self.parser.tree);
+                self.parser.tree = tree.?;
+            } else {
+                const tree = dvui.c.ts_parser_parse_string(self.parser.parser, null, self.text.ptr, @intCast(self.text.len));
+                dvui.c.ts_tree_delete(self.parser.tree);
+                self.parser.tree = tree.?;
+            }
+        }
+
+        /// Call before `next` if known.  Usually from TextLayoutWidget.cache_layout_bytes.
+        pub fn setByteRange(self: *ParseIterator, start: usize, end: usize) void {
+            _ = dvui.c.ts_query_cursor_set_byte_range(self.query_cursor, @intCast(start), @intCast(end));
+        }
+
+        pub fn nextInner(self: *ParseIterator) ?Match {
+            if (self.cur_match) |cm| {
+                self.cur_match = null;
+                return cm;
+            }
+
+            var match: dvui.c.TSQueryMatch = undefined;
+            var captureIdx: u32 = undefined;
+            loop: while (dvui.c.ts_query_cursor_next_capture(self.query_cursor, &match, &captureIdx)) {
+                const capture = match.captures[captureIdx];
+                if (self.prev_match) |pm| {
+                    if (dvui.c.ts_node_eq(pm.node, capture.node)) {
+                        // same node as previous
+                        self.prev_match = .{ .iter = self, .node = capture.node, .capture_index = capture.index };
+                        if (self.debug) self.prev_match.?.debugLog("ts same ");
+                        continue :loop;
+                    }
+
+                    // not the same
+                    const ret = self.prev_match;
+                    self.prev_match = .{ .iter = self, .node = capture.node, .capture_index = capture.index };
+                    if (self.debug) self.prev_match.?.debugLog("ts new  ");
+                    return ret;
+                } else {
+                    // first time
+                    self.prev_match = .{ .iter = self, .node = capture.node, .capture_index = capture.index };
+                    if (self.debug) self.prev_match.?.debugLog("ts first");
+                    continue :loop;
+                }
+            }
+
+            const ret = self.prev_match;
+            if (ret) |r| {
+                if (self.debug) r.debugLog("ts last ");
+            }
+            self.prev_match = null;
+            return ret;
+        }
+
+        pub const TextHighlight = struct {
+            text: []const u8,
+            opts: ?dvui.Options = null,
+        };
+
+        pub fn next(self: *ParseIterator) ?TextHighlight {
+            if (self.first) {
+                self.first = false;
+                dvui.c.ts_query_cursor_exec(self.query_cursor, self.parser.query, dvui.c.ts_tree_root_node(self.parser.tree));
+            }
+
+            while (true) {
+                const m = self.nextInner();
+                if (m == null) {
+                    if (self.start < self.text.len) {
+                        // any leftover non highlighted text
+                        defer self.start = self.text.len;
+                        return .{ .text = self.text[self.start..] };
+                    }
+
+                    return null;
+                }
+
+                const match = m.?;
+                const nstart = dvui.c.ts_node_start_byte(match.node);
+                const nend = dvui.c.ts_node_end_byte(match.node);
+                if (self.start < nstart) {
+                    // render non highlighted text up to this node
+                    defer self.start = nstart;
+                    defer self.cur_match = match;
+                    return .{ .text = self.text[self.start..nstart] };
+                } else if (nstart < self.start) {
+                    // this match is inside (or overlapping) the previous match
+                    // maybe we could be smarter here, but for now drop it
+                    continue;
+                }
+
+                const capture_name = match.captureName();
+                for (0..self.ts.highlights.len) |i| {
+                    const sh = self.ts.highlights[self.ts.highlights.len - i - 1];
+                    if (std.mem.startsWith(u8, capture_name, sh.name)) {
+                        defer self.start = nend;
+                        return .{ .text = self.text[nstart..nend], .opts = sh.opts };
+                    }
+                }
+            }
+        }
+    };
+
+    /// Parse text and cache it data under id/name.
+    /// * Call `reparse` after this if the text has changed.
+    /// * Call `setByteRange` after this to limit the scope of matches.
+    pub fn parse(self: *const TreeSitter, id: dvui.Id, name: []const u8, text: []const u8) ParseIterator {
+        const parser = dvui.dataGetPtr(null, id, name, Parser) orelse blk: {
+            const p = dvui.c.ts_parser_new();
+            _ = dvui.c.ts_parser_set_language(p, self.language);
+            const tree = dvui.c.ts_parser_parse_string(p, null, text.ptr, @intCast(text.len));
+
+            var errorOffset: u32 = undefined;
+            var errorType: dvui.c.TSQueryError = undefined;
+            const query = dvui.c.ts_query_new(self.language, self.queries.ptr, @intCast(self.queries.len), &errorOffset, &errorType);
+
+            const parser: Parser = .{ .parser = p.?, .tree = tree.?, .query = query.? };
+            dvui.dataSet(null, id, name, parser);
+            dvui.dataSetDeinitFunction(null, id, name, &Parser.deinit);
+            break :blk dvui.dataGetPtr(null, id, name, Parser).?;
+        };
+
+        return .{
+            .ts = self,
+            .parser = parser,
+            .text = text,
+            .query_cursor = dvui.c.ts_query_cursor_new().?,
+        };
+    }
+
+    pub const Parser = struct {
+        parser: *dvui.c.TSParser,
+        tree: *dvui.c.TSTree,
+        query: *dvui.c.TSQuery,
+
+        pub fn deinit(ptr: *anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+
+            dvui.c.ts_query_delete(self.query);
+            dvui.c.ts_tree_delete(self.tree);
+            dvui.c.ts_parser_delete(self.parser);
+        }
+    };
+} else void;
 
 test {
     //std.debug.print("DVUI test\n", .{});

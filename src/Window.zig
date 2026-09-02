@@ -34,7 +34,7 @@ kerning: bool = true,
 alpha: f32 = 1.0,
 
 /// Uses `arena` allocator
-events: std.ArrayListUnmanaged(Event) = .empty,
+events: std.ArrayList(Event) = .empty,
 event_num: u16 = 0,
 /// mouse_pt tracks the last position we got a mouse event for
 /// 1) used to add position info to mouse wheel events
@@ -43,6 +43,9 @@ event_num: u16 = 0,
 // Start off screen so nothing is highlighted on the first frame
 mouse_pt: Point.Physical = .{ .x = -1, .y = -1 },
 mouse_pt_prev: Point.Physical = .{ .x = -1, .y = -1 },
+mouse_type: dvui.enums.MouseType = .unknown,
+mouse_type_min: [2]f32 = .{ 99999, 99999 },
+mouse_type_last_wheel_ns: i128 = 0,
 /// Holds the current state of the modifiers from the most
 /// recently added key event. Used for adding modifiers to
 /// mouse events
@@ -51,12 +54,37 @@ inject_motion_event: bool = false,
 
 dragging: dvui.Dragging = .{},
 
+/// Press-and-hold duration before a context menu opens from touch or long click.
+hold_menu_duration_ns: i128 = 500_000_000,
+
 frame_time_ns: i128 = 0,
 loop_wait_target: ?i128 = null,
 loop_wait_target_can_interrupt: bool = false,
 loop_target_slop: i32 = 1000, // 1ms frame overhead seems a good place to start
 loop_target_slop_frames: i32 = 0,
 frame_times: [10]u32 = @splat(0),
+
+/// Render stats accumulated during the in-progress frame. Reset in `begin`,
+/// snapshotted at the end of rendering. Query the last completed frame with
+/// `renderStats`.
+render_stats: RenderStats = .{},
+render_stats_last: RenderStats = .{},
+
+/// `FrameTiming` snapshot of the last completed frame. Query with
+/// `frameTiming`. The `ft_*` fields below are per-frame scratch used to
+/// compute it; they are not meant to be read directly.
+frame_timing_last: FrameTiming = .{},
+/// `backend.nanoTime` at the top of `begin` (start of the whole frame).
+ft_total_start: i128 = 0,
+/// `backend.nanoTime` at the bottom of `begin` (start of the event-injection
+/// phase, before the backend pumps OS events into the window).
+ft_events_start: i128 = 0,
+/// `backend.nanoTime` when the first widget of the frame registered (start of
+/// the build phase). Defaults to `ft_events_start` so empty frames are sane.
+ft_build_start: i128 = 0,
+/// True between `begin` returning and the first widget registering, i.e. while
+/// the window is still in the event phase. See `WidgetData.register`.
+ft_awaiting_build: bool = false,
 
 /// Debugging aid, only used in waitTime(), null means no max
 max_fps: ?f32 = null,
@@ -80,13 +108,15 @@ data_store: dvui.Data = .{},
 /// Uses `gpa` allocator
 animations: dvui.TrackingAutoHashMap(Id, Animation, .get_and_put, void) = .empty,
 /// Uses `gpa` allocator
-tab_index_prev: std.ArrayListUnmanaged(dvui.TabIndex) = .empty,
+tab_index_prev: std.ArrayList(dvui.TabIndex) = .empty,
 /// Uses `gpa` allocator
-tab_index: std.ArrayListUnmanaged(dvui.TabIndex) = .empty,
+tab_index: std.ArrayList(dvui.TabIndex) = .empty,
 /// Uses `gpa` allocator
 fonts: dvui.Font.Cache = .{},
 /// Uses `gpa` allocator
 texture_cache: dvui.Texture.Cache = .{},
+/// Uses `gpa` allocator
+icon_mesh_cache: dvui.render_tvg.MeshCache = .{},
 /// Uses `gpa` allocator
 dialogs: dvui.Dialogs = .{},
 /// Uses `gpa` allocator
@@ -97,13 +127,20 @@ toasts: dvui.Dialogs = .{},
 /// Uses `gpa` allocator
 keybinds: std.StringHashMapUnmanaged(dvui.enums.Keybind) = .empty,
 
+/// Uses `gpa` allocator
+child_os_wins: dvui.TrackingAutoHashMap(dvui.Id, dvui.OsWindowWidget.ChildOsWindow, .get_and_put, void) = .empty,
+/// set to false by `dvui.OsWindow` to spot child windows.
+///  Noticably allow `dvui.debug` to know when we reach the "last" `dvui.end()`
+is_primary: bool = true,
+
 cursor_requested: ?dvui.enums.Cursor = null,
 
 wd: WidgetData,
 current_parent: Widget,
 rect_pixels: dvui.Rect.Physical = .{},
 natural_scale: f32 = 1.0,
-/// can set separately but gets folded into natural_scale
+/// used for whole-app scaling, combined with backend/system/monitor content
+/// scale and all folded into natural_scale
 content_scale: f32 = 1.0,
 layout: dvui.BasicLayout = .{},
 
@@ -118,9 +155,44 @@ _widget_stack: WidgetStack,
 render_target: dvui.RenderTarget = .{ .texture = null, .offset = .{} },
 end_rendering_done: bool = false,
 
-debug: @import("Debug.zig") = .{},
+/// See `InitOptions.open_flag`
+open_flag: ?*bool = null,
 
 accesskit: dvui.AccessKit,
+
+/// Per-frame rendering cost counters. Accumulated above the backend, so the
+/// numbers are backend-agnostic. See `Window.renderStats`.
+pub const RenderStats = struct {
+    /// Calls to `Backend.drawClippedTriangles` (one per `render.renderTriangles`).
+    draw_calls: u32 = 0,
+    /// Triangles submitted (sum of index counts / 3).
+    triangles: u32 = 0,
+    /// Vertices submitted.
+    vertices: u32 = 0,
+    /// Draw calls that bound a texture.
+    texture_binds: u32 = 0,
+    /// Textures created this frame via `Texture.create`.
+    textures_created: u32 = 0,
+};
+
+/// CPU phase timing for one dvui frame, in nanoseconds. Measured with the
+/// backend's `nanoTime`, the same clock used by `waitTime`. The phases are the
+/// major work and do not necessarily sum to `total_ns` (the small `begin`/`end`
+/// bookkeeping in between is not attributed to a phase). See `Window.frameTiming`.
+pub const FrameTiming = struct {
+    /// Event-injection phase: `begin` returning until the first widget registers
+    /// (the backend pumping OS events into the window via `addEvent*`).
+    events_ns: u64 = 0,
+    /// Build phase: user widget code, from the first widget registering until
+    /// rendering starts in `endRendering`.
+    build_ns: u64 = 0,
+    /// Render phase: submitting the deferred render commands in `endRendering`.
+    render_ns: u64 = 0,
+    /// Whole frame's CPU work, from the top of `begin` to the end of `end`, but
+    /// stopping before the backend presents so a blocking/vsync present is
+    /// excluded. Includes the small bookkeeping the phases above leave out.
+    total_ns: u64 = 0,
+};
 
 pub const InitOptions = struct {
     id_extra: usize = 0,
@@ -136,6 +208,11 @@ pub const InitOptions = struct {
         mac,
     } = null,
 
+    /// If dvui process a "quit window" event for this window, it will set this flag to false.
+    ///
+    /// Leave to `null` if you are dealing with such events yourself.
+    open_flag: ?*bool = null,
+
     button_order: ?dvui.enums.DialogButtonOrder = null,
 };
 
@@ -145,7 +222,10 @@ pub fn init(
     backend_ctx: dvui.Backend,
     init_opts: InitOptions,
 ) !Self {
-    const hashval = dvui.Id.extendId(null, src, init_opts.id_extra);
+    const hashval = if (dvui.current_window) |cw|
+        cw.data().id.extendId(src, init_opts.id_extra)
+    else
+        dvui.Id.extendId(null, src, init_opts.id_extra);
 
     var self = Self{
         .gpa = gpa,
@@ -167,6 +247,7 @@ pub fn init(
         // Set in `begin`
         .current_parent = undefined,
         .theme = undefined, // set below
+        .open_flag = init_opts.open_flag,
         .backend = backend_ctx,
         .accesskit = .{},
     };
@@ -240,8 +321,10 @@ pub fn init(
                 try self.keybinds.putNoClobber(self.gpa, "char_up_select",   .{ .key = .up,   .shift = true });
                 try self.keybinds.putNoClobber(self.gpa, "char_down_select", .{ .key = .down, .shift = true });
 
-                try self.keybinds.putNoClobber(self.gpa, "delete_prev_word", .{ .key = .backspace, .control = true });
-                try self.keybinds.putNoClobber(self.gpa, "delete_next_word", .{ .key = .delete,    .control = true });
+                try self.keybinds.putNoClobber(self.gpa, "delete_prev_word",     .{ .key = .backspace, .control = true, .shift = false });
+                try self.keybinds.putNoClobber(self.gpa, "delete_next_word",     .{ .key = .delete,    .control = true, .shift = false });
+                try self.keybinds.putNoClobber(self.gpa, "delete_to_line_start", .{ .key = .backspace, .control = true, .shift = true });
+                try self.keybinds.putNoClobber(self.gpa, "delete_to_line_end",   .{ .key = .delete,    .control = true, .shift = true });
                 // zig fmt: on
         },
         .mac => {
@@ -279,15 +362,17 @@ pub fn init(
                 try self.keybinds.putNoClobber(self.gpa, "char_up_select",   .{ .key = .up,   .shift = true,  .command = false });
                 try self.keybinds.putNoClobber(self.gpa, "char_down_select", .{ .key = .down, .shift = true,  .command = false });
 
-                try self.keybinds.putNoClobber(self.gpa, "delete_prev_word", .{ .key = .backspace, .alt = true });
-                try self.keybinds.putNoClobber(self.gpa, "delete_next_word", .{ .key = .delete,    .alt = true });
+                try self.keybinds.putNoClobber(self.gpa, "delete_prev_word",     .{ .key = .backspace, .alt = true });
+                try self.keybinds.putNoClobber(self.gpa, "delete_next_word",     .{ .key = .delete,    .alt = true });
+                try self.keybinds.putNoClobber(self.gpa, "delete_to_line_start", .{ .key = .backspace, .command = true, .alt = false });
+                try self.keybinds.putNoClobber(self.gpa, "delete_to_line_end",   .{ .key = .delete,    .command = true, .alt = false });
                 // zig fmt: on
         },
     }
 
     const winSize = self.backend.windowSize();
     const pxSize = self.backend.pixelSize();
-    self.content_scale = self.backend.contentScale();
+    const sysContentScale = self.backend.contentScale();
 
     // Even on hidpi screens I see slight flattening of the sides of glyphs
     // when snap_to_pixels is false, so we are going to default on for now.
@@ -296,7 +381,7 @@ pub fn init(
     //    self.snap_to_pixels = false;
     //}
 
-    log.info("window logical {f} pixels {f} natural scale {d} initial content scale {d} snap_to_pixels {any} accesskit {any}\n", .{ winSize, pxSize, pxSize.w / winSize.w, self.content_scale, self.snap_to_pixels, dvui.accesskit_enabled });
+    log.info("window logical {f} pixels {f} pixel scale {d} initial content scale {d} snap_to_pixels {any} accesskit {any}\n", .{ winSize, pxSize, pxSize.w / winSize.w, sysContentScale, self.snap_to_pixels, dvui.accesskit_enabled });
 
     errdefer self.deinit();
 
@@ -321,6 +406,15 @@ pub const Native = switch (builtin.os.tag) {
 
 pub fn native(self: *Self) Native {
     return self.backend.native(self);
+}
+
+/// Change the title of the OS window, if supported by the backend.
+pub fn title(self: *Self, new_title: []const u8) void {
+    self.backend.title(self, new_title);
+}
+
+pub fn stateSet(self: *Self, state: dvui.enums.WindowState) void {
+    self.backend.windowStateSet(self, state);
 }
 
 pub fn addFont(self: *Self, name: []const u8, ttf_bytes: []const u8, ttf_bytes_allocator: ?std.mem.Allocator) (std.mem.Allocator.Error || dvui.Font.Error)!void {
@@ -375,9 +469,11 @@ pub fn deinit(self: *Self) void {
     self.data_store.deinit(self.gpa);
 
     self.texture_cache.deinit(self.gpa, self.backend);
+    self.icon_mesh_cache.deinit(self.gpa);
     self.fonts.deinit(self.gpa, self.backend);
 
-    self.debug.deinit(self.gpa);
+    if (self.is_primary)
+        dvui.debug.deinit(self.gpa);
 
     self.subwindows.deinit(self.gpa);
     self.min_sizes.deinit(self.gpa);
@@ -397,6 +493,13 @@ pub fn deinit(self: *Self) void {
 
     self.dialogs.deinit(self.gpa);
     self.toasts.deinit(self.gpa);
+
+    var child_win_it = self.child_os_wins.iterator();
+    while (child_win_it.next()) |remaining_win| {
+        remaining_win.value_ptr.deinit(self.gpa);
+    }
+    self.child_os_wins.deinit(self.gpa);
+
     self.keybinds.deinit(self.gpa);
     self._arena.deinit();
     self._lifo_arena.deinit();
@@ -437,7 +540,7 @@ pub fn arena(self: *Self) std.mem.Allocator {
 
 /// called from gui thread
 pub fn refreshWindow(self: *Self, src: std.builtin.SourceLocation, id: ?Id) void {
-    if (self.debug.logRefresh(null)) {
+    if (dvui.debug.logRefresh(null)) {
         log.debug("{s}:{d} refresh {?x}", .{ src.file, src.line, id });
     }
     self.extra_frames_needed = 1;
@@ -445,7 +548,7 @@ pub fn refreshWindow(self: *Self, src: std.builtin.SourceLocation, id: ?Id) void
 
 /// called from any thread
 pub fn refreshBackend(self: *Self, src: std.builtin.SourceLocation, id: ?Id) void {
-    if (self.debug.logRefresh(null)) {
+    if (dvui.debug.logRefresh(null)) {
         log.debug("{s}:{d} refreshBackend {?x}", .{ src.file, src.line, id });
     }
     self.backend.refresh();
@@ -458,7 +561,7 @@ pub fn focusWidget(self: *Self, id: ?Id, subwindow_id: ?Id, event_num: ?u16) voi
         if (sw.focused_widget_id == id) return;
         sw.focused_widget_id = id;
         if (event_num) |en| {
-            self.focusEvents(en, sw.id, sw.focused_widget_id);
+            self.focusEvents(en, sw.focused_widget_id);
         }
         self.refreshWindow(@src(), null);
 
@@ -494,18 +597,20 @@ pub fn focusWidget(self: *Self, id: ?Id, subwindow_id: ?Id, event_num: ?u16) voi
             var found_left: bool = false;
             for (self.tab_index_prev.items) |ti| {
                 if (ti.windowId == sw.id) {
-                    const diff = self.mouse_pt.diff(ti.pt);
-                    const d = diff.x * diff.x + diff.y * diff.y;
-                    if (diff.x >= 0 and ((diff.y >= 0 and diff.y <= diff.x) or (diff.y < 0 and @abs(diff.y) <= diff.x * 0.1))) {
-                        if (sw.kb_restart_widget_id == null or !found_left or d < closest) {
-                            sw.kb_restart_widget_id = ti.widgetId;
-                            closest = d;
-                        }
-                        found_left = true;
-                    } else if (!found_left) {
-                        if (sw.kb_restart_widget_id == null or d < closest) {
-                            sw.kb_restart_widget_id = ti.widgetId;
-                            closest = d;
+                    if (ti.rect) |r| {
+                        const diff = self.mouse_pt.diff(r.topLeft());
+                        const d = diff.x * diff.x + diff.y * diff.y;
+                        if (diff.x >= 0 and ((diff.y >= 0 and diff.y <= diff.x) or (diff.y < 0 and @abs(diff.y) <= diff.x * 0.1))) {
+                            if (sw.kb_restart_widget_id == null or !found_left or d < closest) {
+                                sw.kb_restart_widget_id = ti.widgetId;
+                                closest = d;
+                            }
+                            found_left = true;
+                        } else if (!found_left) {
+                            if (sw.kb_restart_widget_id == null or d < closest) {
+                                sw.kb_restart_widget_id = ti.widgetId;
+                                closest = d;
+                            }
                         }
                     }
                 }
@@ -522,18 +627,17 @@ pub fn focusSubwindow(self: *Self, subwindow_id: ?Id, event_num: ?u16) void {
     self.refreshWindow(@src(), null);
     if (event_num) |en| {
         if (self.subwindows.focused()) |sw| {
-            self.focusEvents(en, sw.id, sw.focused_widget_id);
+            self.focusEvents(en, sw.focused_widget_id);
         }
     }
 }
 
 // Only for keyboard events
-pub fn focusEvents(self: *Self, event_num: u16, windowId: ?Id, widgetId: ?Id) void {
+pub fn focusEvents(self: *Self, event_num: u16, widgetId: ?Id) void {
     for (self.events.items) |*e| {
         if (e.num > event_num) {
             switch (e.evt) {
                 .key, .text => {
-                    e.target_windowId = windowId;
                     e.target_widgetId = widgetId;
                 },
                 .mouse => {},
@@ -566,11 +670,11 @@ pub fn captureEvents(self: *Self, event_num: u16, widgetId: ?Id) void {
 /// for a frame either before begin() or just after begin() and before
 /// calling normal dvui widgets.  end() clears the event list.
 pub fn addEventKey(self: *Self, event: Event.Key) std.mem.Allocator.Error!bool {
-    if (self.debug.target == .mouse_until_esc and event.action == .down and event.code == .escape) {
+    if (dvui.debug.target == .mouse_until_esc and event.action == .down and event.code == .escape) {
         // an escape will stop the debug stuff from following the mouse,
         // but need to stop it at the end of the frame when we've gotten
         // the info
-        self.debug.target = .mouse_quitting;
+        dvui.debug.target = .mouse_quitting;
         return true;
     }
 
@@ -582,7 +686,6 @@ pub fn addEventKey(self: *Self, event: Event.Key) std.mem.Allocator.Error!bool {
     try self.events.append(self.arena(), Event{
         .num = self.event_num,
         .evt = .{ .key = event },
-        .target_windowId = self.subwindows.focused_id,
         .target_widgetId = if (self.subwindows.focused()) |sw| sw.focused_widget_id else null,
     });
 
@@ -616,7 +719,6 @@ pub fn addEventText(self: *Self, opts: AddEventTextOptions) std.mem.Allocator.Er
                 .selected = opts.selected,
             } } },
         },
-        .target_windowId = self.subwindows.focused_id,
         .target_widgetId = opts.target_id orelse if (self.subwindows.focused()) |sw| sw.focused_widget_id else null,
     });
 
@@ -648,7 +750,6 @@ pub fn addEventTextSelect(self: *Self, opts: AddEventTextSelectOptions) std.mem.
                 .end = opts.end,
             } } },
         },
-        .target_windowId = self.subwindows.focused_id,
         .target_widgetId = opts.target_id orelse if (self.subwindows.focused()) |sw| sw.focused_widget_id else null,
     });
 
@@ -731,7 +832,7 @@ pub fn addEventMouseMotion(self: *Self, opts: AddEventMouseMotionOptions) std.me
         .evt = .{
             .mouse = .{
                 .action = .{ .motion = dp },
-                .button = if (self.debug.touch_simulate_events and self.debug.touch_simulate_down) .touch0 else .none,
+                .button = if (dvui.debug.touch_simulate_events and dvui.debug.touch_simulate_down) .touch0 else .none,
                 .mod = self.modifiers,
                 .p = self.mouse_pt,
                 .floating_win = winId,
@@ -767,21 +868,21 @@ pub const AddEventPointerOptions = struct {
 /// for a frame either before begin() or just after begin() and before
 /// calling normal dvui widgets.  end() clears the event list.
 pub fn addEventPointer(self: *Self, opts: AddEventPointerOptions) std.mem.Allocator.Error!bool {
-    if (self.debug.target == .mouse_until_click and opts.action == .press and opts.button.pointer()) {
+    if (dvui.debug.target == .mouse_until_click and opts.action == .press and opts.button.pointer()) {
         // a left click or touch will stop the debug stuff from following
         // the mouse, but need to stop it at the end of the frame when
         // we've gotten the info
-        self.debug.target = .mouse_quitting;
+        dvui.debug.target = .mouse_quitting;
         return true;
     }
 
     var bb = opts.button;
-    if (self.debug.touch_simulate_events and bb == .left) {
+    if (dvui.debug.touch_simulate_events and bb == .left) {
         bb = .touch0;
         if (opts.action == .press) {
-            self.debug.touch_simulate_down = true;
+            dvui.debug.touch_simulate_down = true;
         } else if (opts.action == .release) {
-            self.debug.touch_simulate_down = false;
+            dvui.debug.touch_simulate_down = false;
         }
     }
 
@@ -818,15 +919,50 @@ pub fn addEventPointer(self: *Self, opts: AddEventPointerOptions) std.mem.Alloca
     return ret;
 }
 
+/// Heuristic for detecting MouseType for GLFW-based backends (like raylib)
+pub fn mouseTypeGLFW(batch_min: f32) dvui.enums.MouseType {
+    if (builtin.os.tag.isDarwin()) {
+        return if (batch_min == 0.1) .trackpad else .mouse;
+    }
+
+    // windows/linux - mouse is whole integers
+    return if (batch_min - @trunc(batch_min) == 0) .mouse else .trackpad;
+}
+
+/// This helps backends guess at the mouse type to pass to `addEventMouseWheel`.
+///
+/// Backends can call this, passing the raw wheel amount, and getting back the
+/// smallest raw wheel amount seen in this batch.  First call you get the same
+/// thing back, batch resets if there is 1 second without data.
+pub fn mouseWheelBatch(self: *Self, dir: dvui.enums.Direction, raw_delta: f32) f32 {
+    //dvui.log.debug("mouseWheelBatch: {any} {d}", .{ dir, raw_delta });
+    const delta_abs = @abs(raw_delta);
+
+    const now = std.Io.Clock.awake.now(dvui.io).nanoseconds;
+    if (now - self.mouse_type_last_wheel_ns > std.time.ns_per_s) {
+        self.mouse_type_min = .{ 99999, 99999 };
+    }
+    self.mouse_type_last_wheel_ns = now;
+
+    const ax: usize = if (dir == .horizontal) 0 else 1;
+    self.mouse_type_min[ax] = @min(self.mouse_type_min[ax], delta_abs);
+    return self.mouse_type_min[ax];
+}
+
 /// Add a mouse wheel event.  Positive ticks means scrolling up / scrolling right.
 ///
 /// If the shift key is being held, any vertical scroll will be transformed to
 /// horizontal.
 ///
+/// When `mouse_type` is non-null, it sets what `dvui.mouseType` returns. See
+/// `mouseWheelBatch`.
+///
 /// This can be called outside begin/end.  You should add all the events
 /// for a frame either before begin() or just after begin() and before
 /// calling normal dvui widgets.  end() clears the event list.
-pub fn addEventMouseWheel(self: *Self, ticks: f32, dir: dvui.enums.Direction) std.mem.Allocator.Error!bool {
+pub fn addEventMouseWheel(self: *Self, ticks: f32, dir: dvui.enums.Direction, mouse_type: ?dvui.enums.MouseType) std.mem.Allocator.Error!bool {
+    if (mouse_type) |mt| self.mouse_type = mt;
+
     self.positionMouseEventRemove();
 
     const winId = self.subwindows.windowFor(self.mouse_pt);
@@ -907,7 +1043,7 @@ pub fn addEventWindow(self: *Self, evt: Event.Window) std.mem.Allocator.Error!vo
     self.event_num += 1;
     try self.events.append(self.arena(), Event{
         .num = self.event_num,
-        .target_windowId = self.data().id,
+        .target_widgetId = self.data().id,
         .evt = .{ .window = evt },
     });
 
@@ -925,7 +1061,6 @@ pub fn addEventApp(self: *Self, evt: Event.App) std.mem.Allocator.Error!void {
     self.event_num += 1;
     try self.events.append(self.arena(), Event{
         .num = self.event_num,
-        .target_windowId = self.data().id,
         .evt = .{ .app = evt },
     });
 
@@ -951,6 +1086,28 @@ pub fn FPS(self: *const Self) f32 {
     }
 
     return fps;
+}
+
+/// `RenderStats` from the last completed frame: draw calls, triangles,
+/// vertices, texture binds, and textures created. Counters are reset at the
+/// start of each frame and snapshotted once rendering finishes, so this is
+/// stable to read at any point in the frame loop.
+pub fn renderStats(self: *const Self) RenderStats {
+    return self.render_stats_last;
+}
+
+/// `FrameTiming` from the last completed frame: CPU nanoseconds spent in the
+/// event, build, and render phases plus the frame total. Computed at phase
+/// boundaries and snapshotted in `end`, so this is stable to read at any point
+/// in the frame loop.
+pub fn frameTiming(self: *const Self) FrameTiming {
+    return self.frame_timing_last;
+}
+
+/// `a - b` clamped to a non-negative `u64`. Used for phase durations from the
+/// monotonic-ish backend clock, guarding against clock jumps.
+fn nsSince(a: i128, b: i128) u64 {
+    return @intCast(@max(0, a - b));
 }
 
 /// Coordinates with `Window.waitTime` to run frames only when needed.
@@ -1023,7 +1180,7 @@ pub fn waitTime(self: *Self, end_micros: ?u32) u32 {
     // minimum time to wait to hit max fps target
     var min_micros: u32 = 0;
     if (self.max_fps) |mfps| {
-        min_micros = @as(u32, @intFromFloat(1_000_000.0 / mfps));
+        min_micros = @as(u32, @trunc(1_000_000.0 / mfps));
     }
 
     //std.debug.print("  end {d:6} min {d:6}", .{end_micros, min_micros});
@@ -1082,25 +1239,38 @@ pub fn waitTime(self: *Self, end_micros: ?u32) u32 {
         self.loop_wait_target = self.frame_time_ns + (@as(i128, @intCast(target_min)) * 1000);
     }
 
-    if (end_micros == null) {
-        // no target, wait indefinitely for next event
-        self.loop_wait_target = null;
-        //std.debug.print("  wait indef\n", .{});
-        return std.math.maxInt(u32);
-    } else if (wait_micros > 0) {
-        // wait conditionally
-        // since we have a timeout we will try to hit that target but set our
-        // flag so that we don't adjust for the target if we wake up to an event
-        self.loop_wait_target = self.frame_time_ns + (@as(i128, @intCast(target)) * 1000);
-        self.loop_wait_target_can_interrupt = true;
-        //std.debug.print("  wait {d:6}\n", .{wait_micros});
-        return wait_micros;
-    } else {
-        // trying to hit the target but ran out of time
-        //std.debug.print("  wait none\n", .{});
-        return 0;
-        // if we had a wait target from min_micros leave it
+    var wait_time_micros_final: u32 = blk: {
+        if (end_micros == null) {
+            // no target, wait indefinitely for next event
+            self.loop_wait_target = null;
+            //std.debug.print("  wait indef\n", .{});
+            break :blk std.math.maxInt(u32);
+        } else if (wait_micros > 0) {
+            // wait conditionally
+            // since we have a timeout we will try to hit that target but set our
+            // flag so that we don't adjust for the target if we wake up to an event
+            self.loop_wait_target = self.frame_time_ns + (@as(i128, @intCast(target)) * 1000);
+            self.loop_wait_target_can_interrupt = true;
+            //std.debug.print("  wait {d:6}\n", .{wait_micros});
+            break :blk wait_micros;
+        } else {
+            // trying to hit the target but ran out of time
+            //std.debug.print("  wait none\n", .{});
+            break :blk 0;
+            // if we had a wait target from min_micros leave it
+        }
+    };
+
+    // Now that we have the waitTime result for this windows, collect the child's ones
+    // and return the smallest to ensure the window in most pressing need gets satisfaction
+    var child_win_it = self.child_os_wins.iterator();
+    while (child_win_it.next()) |remaining_win| {
+        const w = remaining_win.value_ptr.dvui_win;
+        const child_wait_event_micros = w.waitTime(remaining_win.value_ptr.end_micros);
+        wait_time_micros_final = @min(wait_time_micros_final, child_wait_event_micros);
     }
+
+    return wait_time_micros_final;
 }
 
 /// Make this window the current window.
@@ -1110,9 +1280,14 @@ pub fn begin(
     self: *Self,
     time_ns: i128,
 ) dvui.Backend.GenericError!void {
+    self.ft_total_start = self.backend.nanoTime();
+
     try self.backend.accessKitInitInBegin(&self.accesskit);
 
-    var micros_since_last: u32 = 1;
+    // If time_ns jumps backward, then we will stay on the current
+    // frame_time_ns.  In that case we use a dummy value (10ms) for updating
+    // animations and `secondsSinceLastFrame`.
+    var micros_since_last: u32 = 10_000;
     if (time_ns > self.frame_time_ns) {
         // enforce monotinicity
         var nanos_since_last = time_ns - self.frame_time_ns;
@@ -1138,6 +1313,7 @@ pub fn begin(
     }
 
     self.end_rendering_done = false;
+    self.render_stats = .{};
     self.cursor_requested = null;
     self.text_input_rect = null;
     self.last_focused_id_this_frame = .zero;
@@ -1146,11 +1322,13 @@ pub fn begin(
     // just in case something went wrong, start at zero
     dvui.TabIndexGroup.current = .zero;
 
-    self.debug.reset(self.gpa);
+    if (self.is_primary)
+        dvui.debug.reset(self.gpa);
 
     self.data_store.reset(self.gpa);
     self.texture_cache.reset(self.backend);
-    self.subwindows.reset();
+    self.icon_mesh_cache.reset();
+    self.child_os_wins.reset();
     self.fonts.reset(self.gpa, self.backend);
 
     for (self.frame_times, 0..) |_, i| {
@@ -1178,10 +1356,14 @@ pub fn begin(
     // Retain capacity because it's likely to be small and that the same capacity will be needed again
     self.tab_index.clearRetainingCapacity();
 
+    // call this before we call any backend functions like pixelSize or windowSize
+    try self.backend.begin(self.arena());
+
     self.rect_pixels = .fromSize(self.backend.pixelSize());
     dvui.clipSet(self.rect_pixels);
 
-    self.data().rect = Rect.Natural.fromSize(self.backend.windowSize()).scale(1.0 / self.content_scale, Rect);
+    const sysContentScale = self.backend.contentScale();
+    self.data().rect = Rect.Natural.fromSize(self.backend.windowSize()).scale(1.0 / sysContentScale / self.content_scale, Rect);
     self.natural_scale = if (self.data().rect.w == 0) 1.0 else self.rect_pixels.w / self.data().rect.w;
 
     // deal with floating point weirdness when content_scale is like 1.25
@@ -1190,7 +1372,7 @@ pub fn begin(
     self.data().rect.h = @round(self.data().rect.h * 100.0) / 100.0;
     self.natural_scale = @round(self.natural_scale * 100.0) / 100.0;
 
-    //dvui.log.debug("window size {d} x {d} renderer size {d} x {d} scale {d} content_scale {d}", .{ self.data().rect.w, self.data().rect.h, self.rect_pixels.w, self.rect_pixels.h, self.natural_scale, self.content_scale });
+    //dvui.log.debug("window size {d} x {d} renderer size {d} x {d} scale {d} system content scale {d} dvui content_scale {d}", .{ self.data().rect.w, self.data().rect.h, self.rect_pixels.w, self.rect_pixels.h, self.natural_scale, sysContentScale, self.content_scale });
 
     try self.subwindows.add(self.gpa, self.data().id, self.data().rect, self.rect_pixels, false, null, true);
     _ = self.subwindows.setCurrent(self.data().id, .cast(self.data().rect));
@@ -1229,7 +1411,13 @@ pub fn begin(
 
     self.layout = .{};
 
-    try self.backend.begin(self.arena());
+    // Frame phase timing: begin() is done, the app will now pump OS events and
+    // then run widget code. The first widget to register ends the event phase
+    // and starts the build phase (see `WidgetData.register`). Default
+    // ft_build_start to here so an empty frame (no widgets) stays sane.
+    self.ft_events_start = self.backend.nanoTime();
+    self.ft_build_start = self.ft_events_start;
+    self.ft_awaiting_build = true;
 }
 
 fn positionMouseEventAdd(self: *Self) std.mem.Allocator.Error!void {
@@ -1343,14 +1531,21 @@ pub fn renderCommands(self: *Self, queue: []const dvui.RenderCommand) !void {
                 options.color = options.color.opacity(self.alpha);
                 var triangles = try pf.path.fillConvexTriangles(self.lifo(), options);
                 defer triangles.deinit(self.lifo());
-                try dvui.renderTriangles(triangles, null);
+                try dvui.renderTriangles(triangles, triangles.texture);
+            },
+            .pathFill => |pf| {
+                var options = pf.opts;
+                options.color = options.color.opacity(self.alpha);
+                var triangles = try dvui.Path.fillTriangles(self.lifo(), pf.contours, options);
+                defer triangles.deinit(self.lifo());
+                try dvui.renderTriangles(triangles, triangles.texture);
             },
             .pathStroke => |ps| {
                 var options = ps.opts;
                 options.color = options.color.opacity(self.alpha);
                 var triangles = try ps.path.strokeTriangles(self.lifo(), options);
                 defer triangles.deinit(self.lifo());
-                try dvui.renderTriangles(triangles, null);
+                try dvui.renderTriangles(triangles, triangles.texture);
             },
             .sdfRect => |sr| {
                 var rect = sr;
@@ -1410,12 +1605,27 @@ pub fn toastsShow(self: *Self, subwindow_id: ?Id, rect: Rect.Natural) void {
 }
 
 pub const endOptions = struct {
+    /// If true, cursor managment and actual rendering is managed for the user.
+    /// Typically, "ontop" usage would set this to false since it's managed by the main application already.
+    manage_backend: bool = true,
     show_toasts: bool = true,
 };
 
 /// Normally this is called for you in `end`, but you can call it separately in
 /// case you want to do something after everything has been rendered.
 pub fn endRendering(self: *Self, opts: endOptions) void {
+    // Frame phase timing: the build phase ends here and the render phase begins.
+    // Close out the event/build phases before the toasts/dialogs/debug below,
+    // since those register widgets that must not be taken for the build phase.
+    const render_start = self.backend.nanoTime();
+    self.ft_awaiting_build = false;
+    self.frame_timing_last.events_ns = nsSince(self.ft_build_start, self.ft_events_start);
+    self.frame_timing_last.build_ns = nsSince(render_start, self.ft_build_start);
+
+    // The build phase is over, so stop capturing the widget tree for
+    // `Debug.dumpFrame` before the inspector/dialogs below register widgets.
+    dvui.debug.capturing = false;
+
     if (opts.show_toasts) {
         dvui.toastsShow(null, dvui.windowRect());
     }
@@ -1426,7 +1636,8 @@ pub fn endRendering(self: *Self, opts: endOptions) void {
         };
     }
 
-    self.debug.show();
+    if (self.is_primary)
+        dvui.debug.show();
 
     for (self.subwindows.stack.items) |*sw| {
         self.renderCommands(sw.render_cmds.items) catch |err| {
@@ -1442,6 +1653,8 @@ pub fn endRendering(self: *Self, opts: endOptions) void {
         sw.render_cmds_after = .empty;
     }
 
+    self.render_stats_last = self.render_stats;
+    self.frame_timing_last.render_ns = nsSince(self.backend.nanoTime(), render_start);
     self.end_rendering_done = true;
 }
 
@@ -1454,55 +1667,104 @@ pub fn end(self: *Self, opts: endOptions) !?u32 {
     // make sure all widgets reset the parent
     dvui.parentReset(self.data().id, self.widget());
 
+    // endRendering does debug window, do that before cleaning up events
     if (!self.end_rendering_done) {
         self.endRendering(opts);
     }
 
-    // Call this before freeing data so backend can use data allocated during frame.
-    try self.backend.end();
-
     // events may have been tagged with a focus widget that never showed up
     const evts = dvui.events();
+    var tab_dir: dvui.Point = .{};
     for (evts) |*e| {
-        if (self.dragging.state == .dragging and e.evt == .mouse and e.evt.mouse.action == .release) {
-            if (self.debug.logEvents(null)) {
+        // this is the end of the line for all events, so no need for eventMatch
+        if (e.handled) continue;
+
+        // deal with unhandled mouse release to stop drag
+        if (self.dragging.state == .dragging and e.evt == .mouse and e.evt.mouse.action == .release and (self.dragging.button == .none or self.dragging.button == e.evt.mouse.button)) {
+            if (dvui.debug.logEvents(null)) {
                 log.debug("Clearing drag ({?s}) for unhandled mouse release", .{self.dragging.name});
             }
-            self.dragging.state = .none;
-            self.dragging.name = null;
+            self.dragging.end();
             self.refreshWindow(@src(), null);
         }
-
-        if (!dvui.eventMatch(e, .{ .id = self.data().id, .r = self.rect_pixels, .cleanup = true }))
-            continue;
 
         if (e.evt == .mouse) {
             if (e.evt.mouse.action == .focus) {
                 // unhandled click, clear focus
+                e.handle(@src(), self.data());
                 self.focusWidget(null, null, null);
             }
         } else if (e.evt == .key) {
-            if ((e.evt.key.action == .down or e.evt.key.action == .repeat) and e.evt.key.matchBind("next_widget")) {
-                e.handle(@src(), self.data());
-                dvui.tabIndexNext(e.num);
-            }
+            const ke = e.evt.key;
+            if (ke.action == .down or ke.action == .repeat) {
+                if (ke.matchBind("next_widget")) {
+                    e.handle(@src(), self.data());
+                    dvui.tabIndexNext(e.num);
+                    continue;
+                }
 
-            if ((e.evt.key.action == .down or e.evt.key.action == .repeat) and e.evt.key.matchBind("prev_widget")) {
+                if (ke.matchBind("prev_widget")) {
+                    e.handle(@src(), self.data());
+                    dvui.tabIndexPrev(e.num);
+                    continue;
+                }
+
+                if (ke.code == .up) {
+                    e.handle(@src(), self.data());
+                    tab_dir.y = -1;
+                    continue;
+                }
+
+                if (ke.code == .down) {
+                    e.handle(@src(), self.data());
+                    tab_dir.y = 1;
+                    continue;
+                }
+
+                if (ke.code == .left) {
+                    e.handle(@src(), self.data());
+                    tab_dir.x = -1;
+                    continue;
+                }
+
+                if (ke.code == .right) {
+                    e.handle(@src(), self.data());
+                    tab_dir.x = 1;
+                    continue;
+                }
+            }
+        } else if (e.evt == .window) {
+            if (e.evt.window.action == .close) {
                 e.handle(@src(), self.data());
-                dvui.tabIndexPrev(e.num);
+                self.close();
+                self.refreshWindow(@src(), null);
+            } else if (e.evt.window.action == .leave) {
+                e.handle(@src(), self.data());
+                // Put off-screen to avoid things like hover to appear stuck
+                self.mouse_pt = .{ .x = -1, .y = -1 };
+                self.refreshWindow(@src(), null);
+            }
+        } else if (e.evt == .app) {
+            if (e.evt.app.action == .quit) {
+                e.handle(@src(), self.data());
+                self.close();
+                self.refreshWindow(@src(), null);
             }
         }
     }
 
-    if (self.debug.logEvents(null)) {
+    if (tab_dir.nonZero()) {
+        const angle = std.math.atan2(tab_dir.y, tab_dir.x);
+        dvui.tabIndexDirection(angle, null);
+    }
+
+    if (dvui.debug.logEvents(null)) {
         for (evts) |*e| {
             if (e.handled) continue;
             log.debug("Unhandled {f}", .{e});
         }
         log.debug("Event Handing Frame End", .{});
     }
-
-    self.mouse_pt_prev = self.mouse_pt;
 
     const focused_sw = self.subwindows.focused();
     if (focused_sw != null and !focused_sw.?.used) {
@@ -1519,6 +1781,11 @@ pub fn end(self: *Self, opts: endOptions) !?u32 {
 
         self.refreshWindow(@src(), null);
     }
+
+    // Call this before freeing data so backend can use data allocated during frame.
+    try self.backend.end();
+
+    self.mouse_pt_prev = self.mouse_pt;
 
     // Check that the final event was our synthetic mouse position event.
     // If one of the addEvent* functions forgot to add the synthetic mouse
@@ -1543,6 +1810,10 @@ pub fn end(self: *Self, opts: endOptions) !?u32 {
         _ = self._widget_stack.reset(.{ .retain_with_limit = cap - @divTrunc(cap, 10) });
     }
 
+    // Do this here so subwindows that didn't show are gone for events.
+    // Prevent mouse event being tagged with a menu that went away this frame.
+    self.subwindows.reset();
+
     try self.initEvents();
 
     if (self.inject_motion_event) {
@@ -1555,6 +1826,30 @@ pub fn end(self: *Self, opts: endOptions) !?u32 {
     }
 
     defer dvui.current_window = self.previous_window;
+
+    // Frame phase timing: all CPU work is done (event/build/render were filled
+    // in by endRendering). Snapshot the total before the backend presents, so a
+    // blocking/vsync renderPresent doesn't pollute this CPU timing.
+    self.frame_timing_last.total_ns = nsSince(self.backend.nanoTime(), self.ft_total_start);
+
+    if (opts.manage_backend) {
+        self.backend.setCursor(self.cursorRequested());
+        self.backend.textInputRect(self.textInputRequested());
+        self.backend.renderPresent();
+    }
+
+    {
+        // Now close the child os windows that we didn't see during this frame.
+        var child_win_it = self.child_os_wins.iterator();
+        while (child_win_it.next_resetting()) |missing_win| {
+            missing_win.value.deinit(self.gpa);
+        }
+        // And reset the `has_begin` flag to spot duplicate
+        child_win_it = self.child_os_wins.iterator();
+        while (child_win_it.next()) |remaining_win| {
+            remaining_win.value_ptr.has_begin = false;
+        }
+    }
 
     // This is what refresh affects
     if (self.extra_frames_needed > 0) {
@@ -1576,6 +1871,14 @@ pub fn end(self: *Self, opts: endOptions) !?u32 {
     }
 
     return ret;
+}
+
+fn close(self: *Self) void {
+    if (self.open_flag) |of| {
+        of.* = false;
+    } else {
+        dvui.log.warn("{s}:{d} dvui.Window processed closing window event but it has no open_flag", .{ self.data().src.file, self.data().src.line });
+    }
 }
 
 fn initEvents(self: *Self) std.mem.Allocator.Error!void {
@@ -1639,6 +1942,40 @@ const std = @import("std");
 const math = std.math;
 const builtin = @import("builtin");
 const dvui = @import("dvui.zig");
+
+test "renderStats and frameTiming are populated after a frame" {
+    var t = try dvui.testing.init(.{});
+    defer t.deinit();
+
+    const frame = struct {
+        fn frame() !dvui.App.Result {
+            var box = dvui.box(@src(), .{}, .{ .expand = .both, .background = true, .style = .window });
+            defer box.deinit();
+            dvui.label(@src(), "hello {d}", .{42}, .{});
+            return .ok;
+        }
+    }.frame;
+
+    try dvui.testing.settle(frame);
+
+    const win = dvui.currentWindow();
+
+    // Render stats (#1): a backgrounded box with a label must produce draws.
+    const rs = win.renderStats();
+    try std.testing.expect(rs.draw_calls > 0);
+    try std.testing.expect(rs.triangles > 0);
+    try std.testing.expect(rs.vertices > 0);
+
+    // Frame timing (#3): every phase ran this frame. The testing backend's
+    // nanoTime is a fake clock that strictly increments per call, so each phase
+    // boundary lands on a later tick and every span is non-zero. The build and
+    // render phases are nested in (and disjoint within) the frame total.
+    const ft = win.frameTiming();
+    try std.testing.expect(ft.events_ns > 0);
+    try std.testing.expect(ft.build_ns > 0);
+    try std.testing.expect(ft.render_ns > 0);
+    try std.testing.expect(ft.total_ns >= ft.build_ns + ft.render_ns);
+}
 
 test {
     @import("std").testing.refAllDecls(@This());

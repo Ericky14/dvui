@@ -277,10 +277,16 @@ fn handleMouseButtonEvent(dvui_window: *dvui.Window, button: c_int, action: c_in
 }
 
 fn handleScrollEvent(dvui_window: *dvui.Window, xoffset: f64, yoffset: f64) void {
-    const scrollx: f32 = @floatCast(xoffset * dvui.scroll_speed);
-    const scrolly: f32 = @floatCast(yoffset * dvui.scroll_speed);
-    _ = dvui_window.addEventMouseWheel(scrollx, .horizontal) catch {};
-    _ = dvui_window.addEventMouseWheel(scrolly, .vertical) catch {};
+    if (xoffset != 0) {
+        const scrollx: f32 = @floatCast(xoffset * dvui.scroll_speed);
+        const min = dvui_window.mouseWheelBatch(.horizontal, @floatCast(xoffset));
+        _ = dvui_window.addEventMouseWheel(scrollx, .horizontal, dvui.Window.mouseTypeGLFW(min)) catch {};
+    }
+    if (yoffset != 0) {
+        const scrolly: f32 = @floatCast(yoffset * dvui.scroll_speed);
+        const min = dvui_window.mouseWheelBatch(.vertical, @floatCast(yoffset));
+        _ = dvui_window.addEventMouseWheel(scrolly, .vertical, dvui.Window.mouseTypeGLFW(min)) catch {};
+    }
 }
 
 // --- Key code mapping ---

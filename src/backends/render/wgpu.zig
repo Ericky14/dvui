@@ -646,7 +646,11 @@ pub fn drawSdfRect(self: *@This(), sdf_rect: dvui.SdfRect, clipr: ?dvui.Rect.Phy
     self.sdf_instance_byte_offset += inst_bytes_aligned;
 }
 
-pub fn textureCreate(self: *@This(), pixels: [*]const u8, width: u32, height: u32, _: dvui.enums.TextureInterpolation, _: dvui.enums.TexturePixelFormat) !dvui.Texture {
+pub fn textureCreate(self: *@This(), pixels: [*]const u8, options: dvui.Texture.CreateOptions) !dvui.Texture {
+    // One linear clamp sampler serves every texture; interpolation / wrap are
+    // recorded on the returned texture but not (yet) honoured by the sampler.
+    const width = options.width;
+    const height = options.height;
     const tex = wgpu.wgpuDeviceCreateTexture(self.device, &wgpu.WGPUTextureDescriptor{
         .nextInChain = null,
         .label = .{ .data = "dvui_tex", .length = 8 },
@@ -690,7 +694,15 @@ pub fn textureCreate(self: *@This(), pixels: [*]const u8, width: u32, height: u3
     try self.textures.put(key, view);
     try self.bind_groups.put(key, bg);
 
-    return .{ .ptr = tex, .width = width, .height = height, .format = .rgba_32 };
+    return .{
+        .ptr = tex,
+        .width = width,
+        .height = height,
+        .format = .rgba_32,
+        .interpolation = options.interpolation,
+        .wrap_u = options.wrap_u,
+        .wrap_v = options.wrap_v,
+    };
 }
 
 pub fn textureUpdate(self: *@This(), texture: dvui.Texture, pixels: [*]const u8) !void {
@@ -718,8 +730,9 @@ pub fn textureDestroy(self: *@This(), texture: dvui.Texture) void {
     wgpu.wgpuTextureRelease(tex);
 }
 
-pub fn textureCreateTarget(self: *@This(), width: u32, height: u32, _: dvui.enums.TextureInterpolation, format: dvui.enums.TexturePixelFormat) !dvui.TextureTarget {
-    _ = format;
+pub fn textureCreateTarget(self: *@This(), options: dvui.Texture.CreateOptions) !dvui.TextureTarget {
+    const width = options.width;
+    const height = options.height;
     const tex = wgpu.wgpuDeviceCreateTexture(self.device, &wgpu.WGPUTextureDescriptor{
         .nextInChain = null,
         .label = .{ .data = "dvui_target", .length = 11 },
@@ -763,15 +776,23 @@ pub fn textureCreateTarget(self: *@This(), width: u32, height: u32, _: dvui.enum
     };
     try self.target_views.put(key, render_view);
 
-    return .{ .ptr = tex, .width = width, .height = height, .format = .rgba_32 };
+    return .{
+        .ptr = tex,
+        .width = width,
+        .height = height,
+        .format = .rgba_32,
+        .interpolation = options.interpolation,
+        .wrap_u = options.wrap_u,
+        .wrap_v = options.wrap_v,
+    };
 }
 
 pub fn textureFromTarget(_: *@This(), target: dvui.TextureTarget) dvui.Texture {
-    return .{ .ptr = target.ptr, .width = target.width, .height = target.height, .format = target.format };
+    return .cast(target);
 }
 
 pub fn textureFromTargetTemp(_: *@This(), target: dvui.TextureTarget) dvui.Texture {
-    return .{ .ptr = target.ptr, .width = target.width, .height = target.height, .format = target.format };
+    return .cast(target);
 }
 
 pub fn textureDestroyTarget(self: *@This(), texture: dvui.Texture.Target) void {

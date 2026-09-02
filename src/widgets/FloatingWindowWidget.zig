@@ -16,9 +16,9 @@ const FloatingWindowWidget = @This();
 
 /// Defaults is for the embedded box widget
 pub var defaults: Options = .{
-    .name = "Window",
+    .name = "FloatingWindow",
     .role = .dialog,
-    .corner_radius = Rect.all(5),
+    .corners = .default,
     .margin = Rect.all(2),
     .border = Rect.all(1),
     .background = true,
@@ -88,6 +88,7 @@ init_options: InitOptions,
 /// options is for our embedded BoxWidget
 options: Options,
 prev_windowInfo: dvui.subwindowCurrentSetReturn = undefined,
+prev_scroll: ?*dvui.ScrollContainerWidget = undefined,
 prev_last_focus: dvui.Id = undefined,
 layout: ?BoxWidget = null,
 prevClip: Rect.Physical = undefined,
@@ -98,7 +99,7 @@ drag_part: ?DragPart = null,
 drag_area: Rect.Physical = undefined,
 
 pub fn init(self: *FloatingWindowWidget, src: std.builtin.SourceLocation, init_opts: InitOptions, opts: Options) void {
-    const options = defaults.themeOverride(opts.theme).override(opts);
+    const options = defaults.override(opts);
     var box_options = options;
     box_options.role = null;
     box_options.label = null;
@@ -119,6 +120,7 @@ pub fn init(self: *FloatingWindowWidget, src: std.builtin.SourceLocation, init_o
             .rect = .{},
             .role = options.role,
             .label = options.label,
+            .name = options.name,
         }),
         .init_options = init_opts,
     };
@@ -219,7 +221,6 @@ pub fn init(self: *FloatingWindowWidget, src: std.builtin.SourceLocation, init_o
     }
 
     self.data().register();
-    self.render_ftb.initReset();
 
     if (dvui.firstFrame(self.data().id)) {
         dvui.focusSubwindow(self.data().id, null);
@@ -246,18 +247,24 @@ pub fn init(self: *FloatingWindowWidget, src: std.builtin.SourceLocation, init_o
         }
     }
 
-    self.drag_area = self.data().rectScale().r;
-
     dvui.parentSet(self.widget());
-    self.prev_windowInfo = dvui.subwindowCurrentSet(self.data().id, .cast(self.data().rect));
+
+    // standard subwindow stuff
+    {
+        const rs = self.data().rectScale();
+        self.render_ftb.initReset();
+        self.prev_windowInfo = dvui.subwindowCurrentSet(self.data().id, .cast(self.data().rect));
+        dvui.subwindowAdd(self.data().id, self.data().rect, rs.r, self.init_options.modal, if (self.init_options.stay_above_parent_window) self.prev_windowInfo.id else null, true);
+        dvui.captureMouseMaintain(.{ .id = self.data().id, .rect = rs.r, .subwindow_id = self.data().id });
+        self.prevClip = dvui.clipGet();
+        dvui.clipSet(dvui.windowRectPixels()); // break out of whatever clipping we were in
+        self.prev_scroll = dvui.ScrollContainerWidget.scrollSet(null);
+    }
+
     // prevents parents from processing key events if focus is inside the floating window
     self.prev_last_focus = dvui.lastFocusedIdInFrame();
 
-    // reset clip to whole OS window
-    // - if modal fade everything below us
-    // - gives us all mouse events
-    self.prevClip = dvui.clipGet();
-    dvui.clipSet(dvui.windowRectPixels());
+    self.drag_area = self.data().rectScale().r;
 
     if (self.data().accesskit_node()) |ak_node| {
         if (self.init_options.modal)
@@ -271,20 +278,16 @@ pub fn init(self: *FloatingWindowWidget, src: std.builtin.SourceLocation, init_o
 }
 
 pub fn drawBackground(self: *FloatingWindowWidget) void {
-    const rs = self.data().rectScale();
-    dvui.subwindowAdd(self.data().id, self.data().rect, rs.r, self.init_options.modal, if (self.init_options.stay_above_parent_window) self.prev_windowInfo.id else null, true);
-    dvui.captureMouseMaintain(.{ .id = self.data().id, .rect = rs.r, .subwindow_id = self.data().id });
-
     if (self.init_options.modal and !dvui.firstFrame(self.data().id)) {
         // paint over everything below
-        var col = self.options.color(.text);
+        var col = self.options.color(.text).toColor();
         col.a = self.init_options.modal_alpha orelse (if (dvui.themeGet().dark) 60 else 80);
-        dvui.windowRectPixels().fill(.{}, .{ .color = col });
+        dvui.windowRectPixels().fill(.{}, .{ .color = .{ .color = col } });
     }
 
     // we are using BoxWidget to do border/background
     self.layout = @as(BoxWidget, undefined);
-    self.layout.?.init(@src(), .{ .dir = .vertical }, self.options.override(.{ .expand = .both }));
+    self.layout.?.init(@src(), .{ .dir = .vertical }, self.options.override(.{ .expand = .both, .name = "Box" }));
     self.layout.?.drawBackground();
 }
 
@@ -413,7 +416,7 @@ pub fn processEventsBefore(self: *FloatingWindowWidget) void {
                     // capture and start drag
                     dvui.captureMouse(self.data(), e.num);
                     self.drag_part = .bottom_right;
-                    dvui.dragStart(me.p, .{ .cursor = .arrow_nw_se, .offset = .diff(rs.r.bottomRight(), me.p) });
+                    dvui.dragStart(me.button, me.p, .{ .cursor = .arrow_nw_se, .offset = .diff(rs.r.bottomRight(), me.p) });
                     e.handle(@src(), self.data());
                     continue;
                 }
@@ -444,7 +447,7 @@ pub fn processEventsAfter(self: *FloatingWindowWidget) void {
     // bottom_right corner happens in processEventsBefore
     const evts = dvui.events();
     for (evts) |*e| {
-        if (!dvui.eventMatch(e, .{ .id = self.data().id, .r = rs.r, .cleanup = true }))
+        if (!dvui.eventMatch(e, .{ .id = self.data().id, .r = rs.r }))
             continue;
 
         switch (e.evt) {
@@ -467,7 +470,7 @@ pub fn processEventsAfter(self: *FloatingWindowWidget) void {
                             // capture and start drag
                             dvui.captureMouse(self.data(), e.num);
                             self.drag_part = dp;
-                            dvui.dragPreStart(e.evt.mouse.p, .{ .cursor = self.drag_part.?.cursor() });
+                            dvui.dragPreStart(e.evt.mouse.button, e.evt.mouse.p, .{ .cursor = self.drag_part.?.cursor() });
                         }
                     },
                     .release => {
@@ -499,18 +502,6 @@ pub fn processEventsAfter(self: *FloatingWindowWidget) void {
                         dvui.cursorSet(dp.cursor());
                     },
                     else => {},
-                }
-            },
-            .key => |ke| {
-                // catch any tabs that weren't handled by widgets
-                if ((ke.action == .down or ke.action == .repeat) and ke.matchBind("next_widget")) {
-                    e.handle(@src(), self.data());
-                    dvui.tabIndexNext(e.num);
-                }
-
-                if ((ke.action == .down or ke.action == .repeat) and ke.matchBind("prev_widget")) {
-                    e.handle(@src(), self.data());
-                    dvui.tabIndexPrev(e.num);
                 }
             },
             else => {},
@@ -601,9 +592,14 @@ pub fn deinit(self: *FloatingWindowWidget) void {
 
     dvui.parentReset(self.data().id, self.data().parent);
     dvui.currentWindow().last_focused_id_this_frame = self.prev_last_focus;
-    _ = dvui.subwindowCurrentSet(self.prev_windowInfo.id, self.prev_windowInfo.rect);
-    dvui.clipSet(self.prevClip);
-    self.render_ftb.deinit();
+
+    // standard subwindow stuff
+    {
+        _ = dvui.ScrollContainerWidget.scrollSet(self.prev_scroll);
+        _ = dvui.subwindowCurrentSet(self.prev_windowInfo.id, self.prev_windowInfo.rect);
+        dvui.clipSet(self.prevClip);
+        self.render_ftb.deinit();
+    }
 }
 
 test {

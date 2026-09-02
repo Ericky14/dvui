@@ -147,6 +147,11 @@ pub fn deinit(self: *@This()) void {
     gl.deleteProgram(self.program);
 }
 
+pub fn clear(_: *@This()) void {
+    gl.clearColor(0, 0, 0, 1);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+}
+
 pub fn begin(self: *@This(), _: std.mem.Allocator) !void {
     gl.useProgram(self.program);
     gl.bindVertexArray(self.vao);
@@ -170,15 +175,15 @@ pub fn end(_: *@This()) !void {}
 
 pub fn drawClippedTriangles(self: *@This(), physical_size: dvui.Size.Physical, maybe_texture: ?dvui.Texture, vtx: []const dvui.Vertex, idx: []const dvui.Vertex.Index, maybe_clipr: ?dvui.Rect.Physical) !void {
     const size = self.render_target_size orelse physical_size;
-    gl.viewport(0, 0, @intFromFloat(size.w), @intFromFloat(size.h));
+    gl.viewport(0, 0, @trunc(size.w), @trunc(size.h));
 
     if (maybe_clipr) |clipr| {
         gl.enable(gl.SCISSOR_TEST);
         gl.scissor(
-            @intFromFloat(clipr.x),
-            @intFromFloat(if (self.render_target_size == null) physical_size.h - clipr.y - clipr.h else clipr.y),
-            @intFromFloat(clipr.w),
-            @intFromFloat(clipr.h),
+            @trunc(clipr.x),
+            @trunc(@as(f32, if (self.render_target_size == null) physical_size.h - clipr.y - clipr.h else clipr.y)),
+            @trunc(clipr.w),
+            @trunc(clipr.h),
         );
     }
 
@@ -214,8 +219,8 @@ pub fn drawClippedTriangles(self: *@This(), physical_size: dvui.Size.Physical, m
     }
 }
 
-pub fn textureCreate(_: *@This(), pixels: [*]const u8, width: u32, height: u32, interpolation: dvui.enums.TextureInterpolation, format: dvui.enums.TexturePixelFormat) !dvui.Texture {
-    return .{ .ptr = @ptrFromInt(try createTexture(pixels, width, height, interpolation, format)), .width = width, .height = height, .format = format };
+pub fn textureCreate(_: *@This(), pixels: [*]const u8, options: dvui.Texture.CreateOptions) !dvui.Texture {
+    return .{ .ptr = @ptrFromInt(try createTexture(pixels, options)), .width = options.width, .height = options.height, .format = options.format, .interpolation = options.interpolation, .wrap_u = options.wrap_u, .wrap_v = options.wrap_v };
 }
 
 pub fn textureUpdate(_: *@This(), texture: dvui.Texture, pixels: [*]const u8) !void {
@@ -231,8 +236,8 @@ pub fn textureDestroy(self: *@This(), texture: dvui.Texture) void {
     }
 }
 
-pub fn textureCreateTarget(self: *@This(), width: u32, height: u32, interpolation: dvui.enums.TextureInterpolation, format: dvui.enums.TexturePixelFormat) !dvui.TextureTarget {
-    const texture = try createTexture(null, width, height, interpolation, format);
+pub fn textureCreateTarget(self: *@This(), options: dvui.Texture.CreateOptions) !dvui.TextureTarget {
+    const texture = try createTexture(null, options);
     errdefer gl.deleteTextures(1, &texture);
 
     var framebuffer: u32 = undefined;
@@ -247,7 +252,7 @@ pub fn textureCreateTarget(self: *@This(), width: u32, height: u32, interpolatio
     gl.clear(gl.COLOR_BUFFER_BIT);
     gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, 0);
 
-    return .{ .ptr = @ptrFromInt(texture), .width = width, .height = height, .format = format };
+    return .{ .ptr = @ptrFromInt(texture), .width = options.width, .height = options.height, .format = options.format, .interpolation = options.interpolation, .wrap_u = options.wrap_u, .wrap_v = options.wrap_v };
 }
 
 pub fn textureReadTarget(_: *@This(), texture: dvui.TextureTarget, pixels_out: [*]u8) !void {
@@ -271,11 +276,11 @@ pub fn textureDestroyTarget(self: *@This(), texture: dvui.Texture.Target) void {
 }
 
 pub fn textureFromTarget(_: *@This(), target: dvui.TextureTarget) !dvui.Texture {
-    return .{ .ptr = target.ptr, .height = target.height, .width = target.width, .format = target.format };
+    return .cast(target);
 }
 
-pub fn textureFromTargetTemp(self: *@This(), target: dvui.TextureTarget) !dvui.Texture {
-    return self.textureFromTarget(target);
+pub fn textureFromTargetTemp(_: *@This(), target: dvui.TextureTarget) !dvui.Texture {
+    return .cast(target);
 }
 
 pub fn renderTarget(self: *@This(), maybe_texture: ?dvui.TextureTarget) !void {
@@ -289,8 +294,8 @@ pub fn renderTarget(self: *@This(), maybe_texture: ?dvui.TextureTarget) !void {
     }
 }
 
-fn createTexture(pixels: ?[*]const u8, width: u32, height: u32, interpolation: dvui.enums.TextureInterpolation, format: dvui.enums.TexturePixelFormat) !u32 {
-    if (format != .rgba_32) {
+fn createTexture(pixels: ?[*]const u8, options: dvui.Texture.CreateOptions) !u32 {
+    if (options.format != .rgba_32) {
         log.err("unsupported texture format", .{});
         return dvui.Backend.TextureError.TextureCreate;
     }
@@ -298,12 +303,18 @@ fn createTexture(pixels: ?[*]const u8, width: u32, height: u32, interpolation: d
     var texture: u32 = undefined;
     gl.genTextures(1, &texture);
     gl.bindTexture(gl.TEXTURE_2D, texture);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, @bitCast(width), @bitCast(height), 0, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, @bitCast(options.width), @bitCast(options.height), 0, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
 
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    switch (options.wrap_u) {
+        .clamp => gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE),
+        .repeat => gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT),
+    }
+    switch (options.wrap_v) {
+        .clamp => gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE),
+        .repeat => gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.REPEAT),
+    }
 
-    switch (interpolation) {
+    switch (options.interpolation) {
         .linear => {
             gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
             gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);

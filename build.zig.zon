@@ -25,14 +25,17 @@
             .hash = "SDL-2.32.10-JToi37G3EgG0eraPos4vhCwC6vVgyB1FYf1SxxhpBr_Y",
             .lazy = true,
         },
+        // Fork of david-vanderson/SDL with an .ios case added to build.zig (upstream's
+        // target-OS switch has none; see linkSdl3 in build.zig and examples/ios-example/README.md).
+        // Additive only — every other target builds identically to the plain upstream fork.
         .sdl3 = .{
-            .url = "git+https://github.com/david-vanderson/SDL#5bbcf665494fe14acadf50601edf6d5f74ebf96a",
-            .hash = "sdl-0.4.2+3.4.4-SDL--tB1pQFLgwvCakiiOSoZIuVaz6a6-_gOZC66AGRD",
+            .url = "git+https://github.com/nat3Github/lib-sdl3-dev-fork#3aec7d397ca8997725dcb624f7470a60c9b33734",
+            .hash = "sdl-0.4.2+3.4.4-SDL--gqNpQF1CjofImvjmIBRf7mkJns3eCFIsRbucO1m",
             .lazy = true,
         },
         .freetype = .{
-            .url = "git+https://github.com/david-vanderson/freetype#cd981cdea11ddd82b89975bb673f25ac069ffc09",
-            .hash = "freetype-2.14.1-alzUkTyBqgBwke4Jsot997WYSpl207Ij9oO-2QOvGrOi",
+            .url = "git+https://github.com/david-vanderson/freetype#4938878b58e8481bc11ac52d6fe10a7cf6c3c7d5",
+            .hash = "freetype-2.14.1-alzUkceCqgDRZIP8PnxnNCd8jwfbwY0k1VhlTV2O5Ivo",
             .lazy = true,
         },
         .raylib = .{
@@ -41,13 +44,23 @@
             .lazy = true,
         },
         .wio = .{
-            .url = "https://github.com/ypsvlq/wio/archive/a182eaa77077270fc780667296d9258df994a8bc.tar.gz",
-            .hash = "wio-0.0.0-8xHrr-1JBwAsNpE9xSRToIPsyCqsnhtpeeydBE8ukWP_",
+            .url = "git+https://github.com/ypsvlq/wio.git#c7a0b1ec889c8c17841ffb04ae3d31810328cc64",
+            .hash = "wio-0.0.0-8xHrr_kECABNBaGmnTW2ymwtaa-Oqg3CWN_tXK6KGFkZ",
             .lazy = true,
         },
         .opengl = .{
             .url = "git+https://github.com/ypsvlq/opengl?master#2cd1835dc6e9b31518597cff25ce95fd07f2e0c7",
             .hash = "opengl-0.0.0-_Vp8-EjsKgDhnkUWeb8Nmr2oEdvsCsDq9bUgmcNi0SuQ",
+            .lazy = true,
+        },
+        .vulkan = .{
+            .url = "git+https://github.com/Snektron/vulkan-zig#b496a6a561ffbbeb530b0f9ed4e059f88c0723a5",
+            .hash = "vulkan-0.0.0-r7Ytx7N9AwD7IZt5_XNHtkJ4G9qY0pCH-cpcOsbL8wzD",
+            .lazy = true,
+        },
+        .vulkan_headers = .{
+            .url = "https://github.com/KhronosGroup/Vulkan-Headers/archive/3dda5a1a87b62fdf3baf4680edc41c00e85a7a22.tar.gz",
+            .hash = "N-V-__8AAB3SBAKySRcX3yPGLhjKZreuo_mCzCTRBgkE1e-v",
             .lazy = true,
         },
         //used in the raylib-ontop example
@@ -64,8 +77,8 @@
         },
         // for rendering tvg icons
         .svg2tvg = .{
-            .url = "git+https://github.com/nat3Github/zig-lib-svg2tvg#228a57074da9e1c3a5b05d8f3d52480df3b3eecd",
-            .hash = "svg2tvg-0.0.0-HpMZuft3BgBNbc4uEpaOsLx5hBxVU2LYjvGrhoYisi55",
+            .url = "git+https://github.com/nat3Github/zig-lib-svg2tvg#2c72af8ff00621b094ca70f03440405f59511fbb",
+            .hash = "svg2tvg-0.0.0-HpMZuaP8BQALdwSolfst0dPGUUn2ptqgfSxVs8RoQJ6K",
             .lazy = true,
         },
         .accesskit = .{
@@ -103,6 +116,11 @@
         .zgl = .{
             .url = "git+https://github.com/ziglibs/zgl#6ee54c287f3c4f176bd05a92746828bb791a1ad0",
             .hash = "zgl-1.1.0-p_NpAJNECgCzUGx0aF5KFsmD5VOwfw8LaOsN0fcoU2bi",
+            .lazy = true,
+        },
+        .pugl = .{
+            .url = "git+https://github.com/bandithedoge/pugl.zig.git#e9dee6e301bd936d1b6a082352de6f80e27bcbc9",
+            .hash = "pugl-0.1.0-CUvtTsddAQAKB-zCXPw0YayfuVFRGB-ATuYPP1Nb3Xmv",
             .lazy = true,
         },
     },

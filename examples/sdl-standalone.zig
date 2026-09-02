@@ -35,7 +35,6 @@ pub fn main(init: std.process.Init) !void {
     var backend = try SDLBackend.initWindow(.{
         .io = init.io,
         .environ_map = init.environ_map,
-        .allocator = init.gpa,
         .size = .{ .w = 800.0, .h = 600.0 },
         .min_size = .{ .w = 250.0, .h = 350.0 },
         .vsync = vsync,
@@ -47,6 +46,7 @@ pub fn main(init: std.process.Init) !void {
 
     _ = SDLBackend.c.SDL_EnableScreenSaver();
 
+    var window_open = true;
     // init dvui Window (maps onto a single OS window)
     var win = try dvui.Window.init(@src(), init.gpa, backend.backend(), .{
         // you can set the default theme here in the init options
@@ -54,12 +54,13 @@ pub fn main(init: std.process.Init) !void {
             .light => dvui.Theme.builtin.adwaita_light,
             .dark => dvui.Theme.builtin.adwaita_dark,
         },
+        .open_flag = &window_open,
     });
     defer win.deinit();
 
     var interrupted = false;
 
-    main_loop: while (true) {
+    main_loop: while (window_open) {
         // beginWait coordinates with waitTime below to run frames only when needed
         const nstime = win.beginWait(interrupted);
 
@@ -69,24 +70,12 @@ pub fn main(init: std.process.Init) !void {
         // send all SDL events to dvui for processing
         try backend.addAllEvents(&win);
 
-        // if dvui widgets might not cover the whole window, then need to clear
-        // the previous frame's render
-        _ = SDLBackend.c.SDL_SetRenderDrawColor(backend.renderer, 0, 0, 0, 0);
-        _ = SDLBackend.c.SDL_RenderClear(backend.renderer);
-
         const keep_running = gui_frame();
         if (!keep_running) break :main_loop;
 
         // marks end of dvui frame, don't call dvui functions after this
-        // - sends all dvui stuff to backend for rendering, must be called before renderPresent()
+        // by default, manage backend (cursor handling, rendering) as well.
         const end_micros = try win.end(.{});
-
-        // cursor management
-        try backend.setCursor(win.cursorRequested());
-        try backend.textInputRect(win.textInputRequested());
-
-        // render frame to OS
-        try backend.renderPresent();
 
         // waitTime and beginWait combine to achieve variable framerates
         const wait_event_micros = win.waitTime(end_micros);
@@ -215,19 +204,19 @@ fn gui_frame() bool {
             .w = (20 * rs.s),
             .h = (20 * rs.s),
         } else rect = .{
-            .x = @intFromFloat(rs.r.x + 4 * rs.s),
-            .y = @intFromFloat(rs.r.y + 4 * rs.s),
-            .w = @intFromFloat(20 * rs.s),
-            .h = @intFromFloat(20 * rs.s),
+            .x = @trunc(rs.r.x + 4 * rs.s),
+            .y = @trunc(rs.r.y + 4 * rs.s),
+            .w = @trunc(20 * rs.s),
+            .h = @trunc(20 * rs.s),
         };
         _ = SDLBackend.c.SDL_SetRenderDrawColor(backend.renderer, 255, 0, 0, 255);
         _ = SDLBackend.c.SDL_RenderFillRect(backend.renderer, &rect);
 
-        rect.x += if (SDLBackend.sdl3) 24 * rs.s else @intFromFloat(24 * rs.s);
+        rect.x += if (SDLBackend.sdl3) 24 * rs.s else @trunc(24 * rs.s);
         _ = SDLBackend.c.SDL_SetRenderDrawColor(backend.renderer, 0, 255, 0, 255);
         _ = SDLBackend.c.SDL_RenderFillRect(backend.renderer, &rect);
 
-        rect.x += if (SDLBackend.sdl3) 24 * rs.s else @intFromFloat(24 * rs.s);
+        rect.x += if (SDLBackend.sdl3) 24 * rs.s else @trunc(24 * rs.s);
         _ = SDLBackend.c.SDL_SetRenderDrawColor(backend.renderer, 0, 0, 255, 255);
         _ = SDLBackend.c.SDL_RenderFillRect(backend.renderer, &rect);
 
@@ -236,7 +225,7 @@ fn gui_frame() bool {
         if (SDLBackend.sdl3)
             _ = SDLBackend.c.SDL_RenderLine(backend.renderer, (rs.r.x + 4 * rs.s), (rs.r.y + 30 * rs.s), (rs.r.x + rs.r.w - 8 * rs.s), (rs.r.y + 30 * rs.s))
         else
-            _ = SDLBackend.c.SDL_RenderDrawLine(backend.renderer, @intFromFloat(rs.r.x + 4 * rs.s), @intFromFloat(rs.r.y + 30 * rs.s), @intFromFloat(rs.r.x + rs.r.w - 8 * rs.s), @intFromFloat(rs.r.y + 30 * rs.s));
+            _ = SDLBackend.c.SDL_RenderDrawLine(backend.renderer, @trunc(rs.r.x + 4 * rs.s), @trunc(rs.r.y + 30 * rs.s), @trunc(rs.r.x + rs.r.w - 8 * rs.s), @trunc(rs.r.y + 30 * rs.s));
     }
 
     if (dvui.button(@src(), "Show Dialog From\nOutside Frame", .{}, .{})) {
@@ -246,13 +235,6 @@ fn gui_frame() bool {
     // only shows the demo if dvui.Examples.show_demo_window is true
     // .full -> .lite or comment out to speed up compile times
     dvui.Examples.demo(.full);
-
-    // check for quitting
-    for (dvui.events()) |*e| {
-        // assume we only have a single window
-        if (e.evt == .window and e.evt.window.action == .close) return false;
-        if (e.evt == .app and e.evt.app.action == .quit) return false;
-    }
 
     return true;
 }

@@ -4,10 +4,10 @@ trash: Trash = .empty,
 
 pub const Data = @This();
 
-pub const Key = dvui.Id;
+pub const Key = dvui.data.Key;
 
-pub const Storage = dvui.TrackingAutoHashMap(Key, SavedData, .get_and_put, dvui.Id);
-pub const Trash = std.ArrayListUnmanaged(SavedData);
+pub const Storage = dvui.TrackingAutoHashMap(Key, SavedData, .get_and_put, dvui.data.Token);
+pub const Trash = std.ArrayList(SavedData);
 
 pub const DeinitFunction = *const fn (*anyopaque) void;
 
@@ -82,8 +82,13 @@ pub fn setSliceCopies(self: *Data, gpa: std.mem.Allocator, key: Key, data: anyty
     const S = @TypeOf(data);
     const sentinel = @typeInfo(Slice(S)).pointer.sentinel();
     const slice, _ = try self.getOrPutSliceT(gpa, key, Slice(S), data.len * num_copies, true);
-    for (0..num_copies) |i| {
-        @memcpy(slice[i * data.len ..][0..data.len], data);
+
+    // if slice and data alias it means dataSetSlice was called with the slice
+    // from dataGetSlice, so it already has the data
+    if (slice.ptr != data.ptr) {
+        for (0..num_copies) |i| {
+            @memcpy(slice[i * data.len ..][0..data.len], data);
+        }
     }
     if (sentinel) |s| slice[slice.len - 1] = s;
 }
@@ -207,20 +212,20 @@ pub fn setDeinitFunction(self: *Data, key: Key, func: DeinitFunction) void {
     }
 }
 
-pub fn retain(self: *Data, gpa: std.mem.Allocator, key: Key, retain_key: ?dvui.Id) std.mem.Allocator.Error!void {
+pub fn retain(self: *Data, gpa: std.mem.Allocator, key: Key, retain_token: ?dvui.data.Token) std.mem.Allocator.Error!void {
     const io = dvui.io;
     self.mutex.lockUncancelable(io);
     defer self.mutex.unlock(io);
 
-    try self.storage.retain(gpa, key, retain_key);
+    try self.storage.retain(gpa, key, retain_token);
 }
 
-pub fn retainClear(self: *Data, retain_key: dvui.Id) void {
+pub fn retainClear(self: *Data, token: dvui.data.Token) void {
     const io = dvui.io;
     self.mutex.lockUncancelable(io);
     defer self.mutex.unlock(io);
 
-    self.storage.retainClear(retain_key);
+    self.storage.retainClear(token);
 }
 
 pub fn remove(self: *Data, gpa: std.mem.Allocator, key: Key) std.mem.Allocator.Error!void {

@@ -16,12 +16,16 @@ pub const Backend = enum {
     web,
     wio,
     wgpu_glfw,
+    pugl,
     /// Does no rendering!
     testing,
+    /// Forwards rendering to a host-injected bridge (plugin dylibs).
+    proxy,
 };
 
 pub const RenderBackend = enum {
     default,
     opengl,
     wgpu,
+    vulkan,
 };

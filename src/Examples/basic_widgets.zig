@@ -42,19 +42,15 @@ pub fn basicWidgets() void {
             defer vbox.deinit();
 
             {
-                const control_opts: dvui.Options = .{};
-                var color: ?dvui.Color = null;
-                if (checkbox_gray) {
-                    // blend text and control colors
-                    color = dvui.Color.average(control_opts.color(.text), control_opts.color(.fill));
-                }
                 var bw: dvui.ButtonWidget = undefined;
-                bw.init(@src(), .{}, .{
-                    .color_text = color,
+                bw.init(@src(), .{ .grayed = checkbox_gray }, .{
                     // If not enabled don't include in tab order (tab_index = 0). Otherwise use default tab index (tab_index = null).
                     .tab_index = if (checkbox_enabled) null else 0,
                 });
                 defer bw.deinit();
+                if (checkbox_gray) {
+                    dvui.tooltip(@src(), .{ .active_rect = bw.data().borderRectScale().r }, "Button is grayed", .{}, .{});
+                }
                 if (checkbox_enabled)
                     bw.processEvents();
                 bw.drawBackground();
@@ -142,16 +138,16 @@ pub fn basicWidgets() void {
             _ = dvui.slider(@src(), .{ .fraction = &slider_val }, .{
                 .expand = .horizontal,
                 .gravity_y = 0.5,
-                .corner_radius = dvui.Rect.all(100),
+                .corners = .all(100),
                 .label = .{ .text = "Sliders1" },
             });
             _ = dvui.slider(@src(), .{ .dir = .vertical, .fraction = &slider_val }, .{
                 .expand = .vertical,
                 .min_size_content = .{ .w = 10 },
-                .corner_radius = dvui.Rect.all(100),
+                .corners = .all(100),
                 .label = .{ .text = "Sliders2" },
             });
-            dvui.label(@src(), "Value: {d:2.2}", .{slider_val}, .{ .gravity_y = 0.5 });
+            dvui.label(@src(), "Value: {d:2.2}", .{slider_val}, .{ .gravity_y = 0.5, .min_size_content = dvui.themeGet().font_body.sizeM(8, 1) });
         }
 
         {

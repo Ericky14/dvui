@@ -16,9 +16,7 @@ pub const EventTypes = union(enum) {
 /// Should not be set directly, use the `handle` method
 handled: bool = false,
 
-/// For key events these represents focus. For mouse events widgetId represents
-/// capture, windowId unused.
-target_windowId: ?dvui.Id = null,
+/// For key events these represents focus. For mouse events represents capture.
 target_widgetId: ?dvui.Id = null,
 
 // num increments within a frame, used in focusRemainingEvents
@@ -43,7 +41,7 @@ pub fn format(self: *const Event, writer: *std.Io.Writer) !void {
 /// matched this event, using `dvui.matchEvent` or similar.
 /// This makes it possible to see which widget handled the event.
 pub fn handle(self: *Event, src: std.builtin.SourceLocation, wd: *const dvui.WidgetData) void {
-    if (dvui.currentWindow().debug.logEvents(null)) {
+    if (dvui.debug.logEvents(null)) {
         dvui.log.debug("{s}:{d} {f} handled by {s} ({x})", .{ src.file, src.line, self, wd.options.name orelse "???", wd.id });
     }
     self.handled = true;
@@ -56,6 +54,9 @@ pub const Text = struct {
     };
 
     pub const Action = union(enum) {
+        /// User entered some text, possibly via IME (Input Method Editor).  On
+        /// some backends you will only receive this if `wantTextInput` was
+        /// called last frame.
         value: struct {
             txt: []u8,
             selected: bool,
@@ -149,6 +150,8 @@ pub const Window = struct {
         /// User clicked close (or did something) so the window manager is
         /// telling this window to close.
         close,
+        /// Mouse pointer left the window.
+        leave,
     };
 
     action: Action,

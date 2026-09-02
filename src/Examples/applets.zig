@@ -18,6 +18,12 @@ pub fn applets() void {
     if (tabs.addTabLabel(active_tab.* == 3, "sub rect", .{})) {
         active_tab.* = 3;
     }
+    if (tabs.addTabLabel(active_tab.* == 4, "uv_rect", .{})) {
+        active_tab.* = 4;
+    }
+    if (tabs.addTabLabel(active_tab.* == 4, "blur", .{})) {
+        active_tab.* = 5;
+    }
 
     tabs.deinit();
 
@@ -26,6 +32,8 @@ pub fn applets() void {
         1 => draw(),
         2 => texture(),
         3 => textureSubRect(),
+        4 => uvRect(),
+        5 => blur(),
         else => {},
     }
 }
@@ -53,7 +61,7 @@ pub fn calculator() void {
             if (i >= loop_labels.len) continue;
             const letter = loop_labels[i];
 
-            var opts = dvui.ButtonWidget.defaults.themeOverride(null).min_sizeM(3, 1);
+            var opts = dvui.ButtonWidget.defaults.min_sizeM(3, 1);
             if (letter == '0') {
                 const extra_space = opts.padSize(.{}).w;
                 opts.min_size_content.?.w *= 2; // be twice as wide as normal
@@ -101,7 +109,7 @@ pub fn calculator() void {
                                 calculation = 0.0;
                                 reset_on_digit = false;
                             }
-                            const letterDigit: f32 = @floatFromInt(letter - '0');
+                            const letterDigit: f32 = letter - '0';
 
                             if (digits_after_dot > 0) {
                                 calculation += letterDigit / @exp(@log(10.0) * digits_after_dot);
@@ -112,7 +120,7 @@ pub fn calculator() void {
                             }
                         } else {
                             if (calculand == null) calculand = 0.0;
-                            const letterDigit: f64 = @floatFromInt(letter - '0');
+                            const letterDigit: f64 = letter - '0';
                             if (digits_after_dot > 0) {
                                 calculand.? += letterDigit / @exp(@log(10.0) * digits_after_dot);
                                 digits_after_dot += 1;
@@ -237,7 +245,7 @@ pub fn draw() void {
 
     for (points.items) |p| {
         dvui.Path.stroke(.{ .points = &.{rs.pointToPhysical(p)} }, .{
-            .color = dvui.Color{ .b = 120, .g = 12, .r = 212 },
+            .color = .{ .color = .{ .b = 120, .g = 12, .r = 212 } },
             .thickness = 5 * rs.s,
         });
     }
@@ -279,7 +287,7 @@ pub fn texture() void {
     defer hbox.deinit();
 
     const tex: dvui.Texture.Target = dvui.dataGet(null, hbox.data().id, "tex", dvui.Texture.Target) orelse blk: {
-        const t = dvui.Texture.Target.create(@intFromFloat(scale * size), @intFromFloat(scale * size), .linear, .rgba_32) catch {
+        const t = dvui.Texture.Target.create(.{ .width = @trunc(scale * size), .height = @trunc(scale * size) }) catch {
             dvui.log.debug("Can't create target texture", .{});
             return;
         };
@@ -366,11 +374,11 @@ pub fn textureSubRect() void {
     const scale: f32 = hbox.data().contentRectScale().s;
 
     var tex: *dvui.Texture = dvui.dataGetPtr(null, hbox.data().id, "tex", dvui.Texture) orelse blk: {
-        const pixels = dvui.currentWindow().arena().alloc(dvui.Color.PMA, @intFromFloat(size * size * scale * scale)) catch @panic("OOM");
+        const pixels = dvui.currentWindow().arena().alloc(dvui.Color.PMA, @trunc(size * size * scale * scale)) catch @panic("OOM");
         for (pixels) |*p| {
             p.* = .black;
         }
-        const t = dvui.Texture.create(pixels, @intFromFloat(scale * size), @intFromFloat(scale * size), .linear, .rgba_32) catch {
+        const t = dvui.Texture.create(pixels, .{ .width = @trunc(scale * size), .height = @trunc(scale * size) }) catch {
             dvui.log.debug("Can't create texture", .{});
             return;
         };
@@ -388,12 +396,12 @@ pub fn textureSubRect() void {
     if (dvui.button(@src(), "Update", .{}, .{})) {
         var rng: std.Random.DefaultPrng = .init(@intCast(dvui.frameTimeNS()));
         var r = rng.random();
-        const x = r.intRangeLessThan(u32, 0, @intFromFloat(size * scale));
-        const y = r.intRangeLessThan(u32, 0, @intFromFloat(size * scale));
-        const w = r.intRangeLessThan(u32, 0, @as(u32, @intFromFloat(size * scale)) - x);
-        const h = r.intRangeLessThan(u32, 0, @as(u32, @intFromFloat(size * scale)) - y);
+        const x = r.intRangeLessThan(u32, 0, @trunc(size * scale));
+        const y = r.intRangeLessThan(u32, 0, @trunc(size * scale));
+        const w = r.intRangeLessThan(u32, 0, @as(u32, @trunc(size * scale)) - x);
+        const h = r.intRangeLessThan(u32, 0, @as(u32, @trunc(size * scale)) - y);
 
-        const pixels = dvui.currentWindow().arena().alloc(dvui.Color.PMA, @intFromFloat(size * size * scale * scale)) catch @panic("OOM");
+        const pixels = dvui.currentWindow().arena().alloc(dvui.Color.PMA, @trunc(size * size * scale * scale)) catch @panic("OOM");
         var newp: dvui.Color.PMA = .{};
         newp.r = r.intRangeLessThan(u8, 0, 255);
         newp.g = r.intRangeLessThan(u8, 0, 255);
@@ -404,6 +412,189 @@ pub fn textureSubRect() void {
         tex.updateSubRect(@ptrCast(pixels.ptr), x, y, w, h) catch |err| {
             dvui.logError(@src(), err, "Could not updateSubRect", .{});
         };
+    }
+}
+
+pub fn uvRect() void {
+    const uniqueId = dvui.parentGet().extendId(@src(), 0);
+    const tex_size = dvui.dataGetPtrDefault(null, uniqueId, "tex_size", f32, 300);
+    const wrapu = dvui.dataGetPtrDefault(null, uniqueId, "wrapu", dvui.enums.TextureWrap, .clamp);
+    const wrapv = dvui.dataGetPtrDefault(null, uniqueId, "wrapv", dvui.enums.TextureWrap, .clamp);
+
+    {
+        var hbox = dvui.box(@src(), .{ .dir = .horizontal }, .{});
+        defer hbox.deinit();
+
+        dvui.label(@src(), "Window over texture", .{}, .{ .gravity_y = 0.5 });
+
+        _ = dvui.spacer(@src(), .{ .min_size_content = .width(10) });
+
+        _ = dvui.sliderEntry(@src(), "Size {d:0.0}", .{ .value = tex_size, .min = 8, .max = 600, .interval = 1 }, .{ .gravity_y = 0.5 });
+    }
+
+    {
+        var hbox = dvui.box(@src(), .{ .dir = .horizontal }, .{});
+        defer hbox.deinit();
+
+        dvui.label(@src(), "Wrap U", .{}, .{ .gravity_y = 0.5 });
+        _ = dvui.dropdownEnum(@src(), dvui.enums.TextureWrap, .{ .choice = wrapu }, .{}, .{});
+
+        _ = dvui.spacer(@src(), .{ .min_size_content = .width(10) });
+
+        dvui.label(@src(), "Wrap V", .{}, .{ .gravity_y = 0.5 });
+        _ = dvui.dropdownEnum(@src(), dvui.enums.TextureWrap, .{ .choice = wrapv }, .{}, .{});
+    }
+
+    const fracx = dvui.dataGetPtrDefault(null, uniqueId, "shiftx", f32, 0.4);
+    const fracy = dvui.dataGetPtrDefault(null, uniqueId, "shifty", f32, 0.4);
+
+    const pixels = dvui.dataGetPtrDefault(null, uniqueId, "pixels", [4]dvui.Color.PMA, .{ .yellow, .cyan, .red, .magenta });
+    const tex = dvui.dataGetPtr(null, uniqueId, "texture", dvui.Texture) orelse blk: {
+        const t = dvui.Texture.create(pixels, .{ .width = 2, .height = 2, .interpolation = .nearest, .wrap_u = wrapu.*, .wrap_v = wrapv.* }) catch @panic("couldn't make texture");
+        dvui.dataSet(null, uniqueId, "texture", t);
+        break :blk dvui.dataGetPtr(null, uniqueId, "texture", dvui.Texture).?;
+    };
+
+    if (wrapu.* != tex.wrap_u or wrapv.* != tex.wrap_v) {
+        dvui.Texture.destroyLater(tex.*);
+        tex.* = dvui.Texture.create(pixels, .{ .width = 2, .height = 2, .interpolation = .nearest, .wrap_u = wrapu.*, .wrap_v = wrapv.* }) catch @panic("couldn't make texture");
+    }
+
+    var texBox = dvui.box(@src(), .{}, .{ .expand = .both });
+    defer texBox.deinit();
+
+    // texture is logically this big
+    const tRectLogical = dvui.placeIn(texBox.data().contentRect().justSize(), .all(tex_size.*), .none, .{ .x = 0.5, .y = 0.5 });
+    const rs = texBox.data().contentRectScale();
+    const tRect = rs.rectToPhysical(tRectLogical);
+    tRect.stroke(.{}, .{ .thickness = 1 * rs.s, .color = .gray });
+
+    // render texture faded in background
+    const a = dvui.alpha(0.3);
+    dvui.renderTexture(tex.*, texBox.data().contentRectScale(), .{
+        .uv_rect = tRect,
+    }) catch @panic("couldn't render texture");
+    dvui.alphaSet(a);
+
+    // we are going to only show this part
+    const size = 100;
+    var windowBox = dvui.box(@src(), .{}, .{
+        .gravity_x = fracx.*,
+        .gravity_y = fracy.*,
+        .min_size_content = .all(size),
+        .corners = .all(12),
+        .border = .all(1),
+    });
+    defer windowBox.deinit();
+
+    dvui.renderTexture(
+        tex.*,
+        windowBox.data().contentRectScale(),
+        .{
+            .corners = windowBox.data().options.cornersGet(),
+            .uv_rect = tRect,
+        },
+    ) catch @panic("couldn't render texture");
+
+    const events = dvui.events();
+    for (events) |*e| {
+        if (!dvui.eventMatchSimple(e, texBox.data())) continue;
+
+        switch (e.evt) {
+            .mouse => |m| {
+                switch (m.action) {
+                    .press, .motion => {
+                        if (m.action == .press and m.button.pointer()) {
+                            dvui.captureMouse(texBox.data(), e.num);
+                        }
+
+                        if (dvui.captured(texBox.data().id)) {
+                            e.handle(@src(), texBox.data());
+                            const r = texBox.data().contentRectScale().r.insetAll(size);
+                            fracx.* = std.math.clamp((m.p.x - r.x) / r.w, 0, 1);
+                            fracy.* = std.math.clamp((m.p.y - r.y) / r.h, 0, 1);
+                            dvui.refresh(null, @src(), texBox.data().id);
+                        }
+                    },
+                    .release => {
+                        if (dvui.captured(texBox.data().id)) {
+                            dvui.captureMouse(null, e.num);
+                        }
+                    },
+                    .position => {
+                        dvui.cursorSet(.hand);
+                    },
+                    else => {},
+                }
+            },
+            else => {},
+        }
+    }
+}
+
+/// Showcase for `dvui.BlurBackdrop`: a cached, dual-Kawase-blurred backdrop
+/// standing in for CSS `backdrop-filter: blur(radius_px)`
+pub fn blur() void {
+    const stage = dvui.box(@src(), .{}, .{ .min_size_content = .{ .w = 300, .h = 250 } });
+    defer stage.deinit();
+
+    const backdrop = dvui.BlurBackdrop.get(@src());
+
+    _ = dvui.sliderEntry(@src(), "radius: {d:0.1}", .{ .value = &backdrop.radius_px, .min = 2, .max = 20 }, .{ .tag = "blur_radius_slider" });
+
+    // Own box for the checkerboard/panel, below the slider - the
+    // checkerboard positions its cells with absolute `.rect` coordinates,
+    // which would otherwise land on top of (and hide) the slider if both
+    // shared the same parent box.
+    const canvas = dvui.box(@src(), .{}, .{ .min_size_content = .{ .w = 300, .h = 220 }, .tag = "blur_canvas" });
+    defer canvas.deinit();
+
+    // Local (canvas-relative) coordinates for the checkerboard and the panel
+    // that will show the blurred version of it. captureBegin/FloatingWidget
+    // both want window-absolute natural coordinates, so convert once here.
+    const canvas_rs = canvas.data().contentRectScale();
+    const local_panel: dvui.Rect = .{ .x = 40, .y = 40, .w = 220, .h = 140 };
+    const panel_abs = dvui.windowRectScale().rectFromPhysical(canvas_rs.rectToPhysical(local_panel));
+
+    // Witness only needs `radius_px` - rect is already covered by
+    // captureBegin's own hash, and nothing else here changes frame to frame.
+    backdrop.init(panel_abs, .{backdrop.radius_px});
+    defer backdrop.deinit();
+    checkerboard();
+
+    {
+        var fw: dvui.FloatingWidget = undefined;
+        fw.init(@src(), .{}, .{ .rect = panel_abs });
+        defer fw.deinit();
+        backdrop.draw();
+        dvui.label(@src(), "backdrop-filter: blur()", .{}, .{ .color_text = .white, .gravity_x = 0.5, .gravity_y = 0.5 });
+    }
+}
+
+fn checkerboard() void {
+    const swatches = [_]dvui.Color{
+        .fromHex("#7c5cff"),
+        .fromHex("#5ce1e6"),
+        .fromHex("#ff9f43"),
+    };
+    const cell: f32 = 20;
+    var y: f32 = 0;
+    var row: usize = 0;
+    while (y + cell <= 220) : (y += cell) {
+        var x: f32 = 0;
+        var col: usize = 0;
+        while (x + cell <= 300) : (x += cell) {
+            const on = (row + col) % 2 == 0;
+            var b = dvui.box(@src(), .{}, .{
+                .id_extra = row * 1000 + col,
+                .rect = .{ .x = x, .y = y, .w = cell, .h = cell },
+                .background = true,
+                .color_fill = .{ .color = if (on) swatches[col % swatches.len] else .black },
+            });
+            b.deinit();
+            col += 1;
+        }
+        row += 1;
     }
 }
 

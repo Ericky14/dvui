@@ -16,8 +16,8 @@ pub fn animations() void {
     };
     const easing_fns, const easing_names = comptime blk: {
         const decls = std.meta.declarations(dvui.easing);
-        var easing_names_arr = [_][]const u8{undefined} ** decls.len;
-        var easing_fns_arr = [_]*const dvui.easing.EasingFn{undefined} ** decls.len;
+        var easing_names_arr: [decls.len][]const u8 = @splat(undefined);
+        var easing_fns_arr: [decls.len]*const dvui.easing.EasingFn = @splat(undefined);
         var i = 0;
         for (decls) |decl| {
             const decl_field = @field(dvui.easing, decl.name);
@@ -27,8 +27,8 @@ pub fn animations() void {
                 i += 1;
             }
         }
-        var out_names = [_][]const u8{undefined} ** i;
-        var out_fns = [_]*const dvui.easing.EasingFn{undefined} ** i;
+        var out_names: [i][]const u8 = @splat(undefined);
+        var out_fns: [i]*const dvui.easing.EasingFn = @splat(undefined);
         @memcpy(&out_names, easing_names_arr[0..i]);
         @memcpy(&out_fns, easing_fns_arr[0..i]);
         break :blk .{ out_fns, out_names };
@@ -124,7 +124,7 @@ pub fn animations() void {
                 .{ .value = &duration_float, .min = 50, .interval = 10, .max = 2_000 },
                 .{ .min_size_content = .{ .w = 180 }, .gravity_y = 0.5 },
             )) {
-                global.duration = @as(i32, @intFromFloat(duration_float)) * std.time.us_per_ms;
+                global.duration = @as(i32, @trunc(duration_float)) * std.time.us_per_ms;
             }
 
             if (recalc) {
@@ -182,14 +182,14 @@ pub fn animations() void {
 
     if (dvui.expander(@src(), "Spinner", .{}, .{ .expand = .horizontal })) {
         dvui.labelNoFmt(@src(), "Spinner maxes out frame rate", .{}, .{});
-        dvui.spinner(@src(), .{ .color_text = .{ .r = 100, .g = 200, .b = 100 } });
+        dvui.spinner(@src(), .{ .color_text = .{ .color = .{ .r = 100, .g = 200, .b = 100 } } });
     }
 
     if (dvui.expander(@src(), "Clock", .{}, .{ .expand = .horizontal })) {
         dvui.labelNoFmt(@src(), "Schedules a frame at the beginning of each second", .{}, .{});
 
         const millis = @divFloor(dvui.frameTimeNS(), 1_000_000);
-        const left = @as(i32, @intCast(@rem(millis, 1000)));
+        const left: i32 = @intCast(@rem(millis, 1000));
 
         {
             var mslabel: dvui.LabelWidget = undefined;
@@ -207,9 +207,9 @@ pub fn animations() void {
         switch (dvui.backend.kind) {
             .sdl2, .sdl3, .sdl3gpu => dvui.label(@src(), "sdl: updated when not interrupted by event", .{}, .{}),
             .web => dvui.label(@src(), "web: updated when not interrupted by event", .{}, .{}),
-            .raylib, .raylib_zig => dvui.label(@src(), "raylib: only updated if non-null passed to waitTime", .{}, .{}),
+            .raylib, .raylib_zig => dvui.label(@src(), "raylib: updated when not interrupted by event", .{}, .{}),
             .dx11 => dvui.label(@src(), "dx11: only updated if non-null passed to waitTime", .{}, .{}),
-            .sdl, .custom, .testing, .glfw, .wio, .wgpu_glfw => {},
+            .sdl, .custom, .testing, .proxy, .glfw, .wio, .pugl, .wgpu_glfw => {},
         }
     }
 
@@ -250,7 +250,7 @@ pub fn animations() void {
         var frame_box = dvui.box(@src(), .{ .dir = .horizontal }, .{ .min_size_content = .{ .w = 50, .h = 50 } });
         defer frame_box.deinit();
 
-        _ = dvui.image(@src(), .{ .source = image_source }, .{ .expand = .both, .corner_radius = if (global.round_corners) dvui.Rect.all(10) else .{} });
+        _ = dvui.image(@src(), .{ .source = image_source }, .{ .expand = .both, .corners = if (global.round_corners) .round(10) else .square });
     }
 }
 

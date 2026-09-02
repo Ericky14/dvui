@@ -1,6 +1,9 @@
 const std = @import("std");
 const dvui = @import("dvui.zig");
 
+const Corner = dvui.Corner;
+const CornerRect = dvui.CornerRect;
+
 pub const Rect = RectType(.none);
 
 pub fn RectType(comptime units: dvui.enums.Units) type {
@@ -227,25 +230,29 @@ pub fn RectType(comptime units: dvui.enums.Units) type {
         /// - h is bottom-left corner
         ///
         /// Only valid between dvui.Window.begin() and end().
-        pub fn stroke(self: Rect.Physical, radius: Rect.Physical, opts: dvui.Path.StrokeOptions) void {
-            if (radius.nonZero()) {
-                dvui.renderSdfRect(.{
-                    .pos = .{ .x = self.x, .y = self.y },
-                    .size = .{ .w = self.w, .h = self.h },
-                    .radii = radius,
-                    .fill_color = dvui.Color{ .r = 0, .g = 0, .b = 0, .a = 0 },
-                    .border_color = opts.color,
-                    .border_width = opts.thickness,
-                    .softness = 1.0,
-                }) catch |err| {
-                    dvui.log.err("SDF stroke error: {}", .{err});
-                };
-                return;
+        pub fn stroke(self: Rect.Physical, corners: CornerRect.Physical, opts: dvui.Path.StrokeOptions) void {
+            // GPU SDF fast path: plain round corners with a solid color.  Deferred
+            // (`after`) strokes and gradients go through the tessellated path.
+            if (sdfRadii(corners)) |radii| {
+                if (opts.color == .color and !opts.after) {
+                    dvui.renderSdfRect(.{
+                        .pos = .{ .x = self.x, .y = self.y },
+                        .size = .{ .w = self.w, .h = self.h },
+                        .radii = radii,
+                        .fill_color = dvui.Color{ .r = 0, .g = 0, .b = 0, .a = 0 },
+                        .border_color = opts.color.color,
+                        .border_width = opts.thickness,
+                        .softness = 1.0,
+                    }) catch |err| {
+                        dvui.log.err("SDF stroke error: {}", .{err});
+                    };
+                    return;
+                }
             }
             var path: dvui.Path.Builder = .init(dvui.currentWindow().lifo());
             defer path.deinit();
 
-            path.addRect(self, radius);
+            path.addRect(self, corners);
             var options = opts;
             options.closed = true;
             path.build().stroke(options);
@@ -260,28 +267,50 @@ pub fn RectType(comptime units: dvui.enums.Units) type {
         /// - h is bottom-left corner
         ///
         /// Only valid between dvui.Window.begin() and end().
-        pub fn fill(self: Rect.Physical, radius: Rect.Physical, opts: dvui.Path.FillConvexOptions) void {
-            if (radius.nonZero()) {
-                dvui.renderSdfRect(.{
-                    .pos = .{ .x = self.x, .y = self.y },
-                    .size = .{ .w = self.w, .h = self.h },
-                    .radii = radius,
-                    .fill_color = opts.color,
-                    .border_color = dvui.Color{ .r = 0, .g = 0, .b = 0, .a = 0 },
-                    .border_width = 0,
-                    // `fade` carries the edge softness: ~1 for normal AA, larger
-                    // for soft drop shadows.
-                    .softness = @max(1.0, opts.fade),
-                }) catch |err| {
-                    dvui.log.err("SDF fill error: {}", .{err});
-                };
-                return;
+        pub fn fill(self: Rect.Physical, corners: CornerRect.Physical, opts: dvui.Path.FillConvexOptions) void {
+            // GPU SDF fast path: plain round corners with a solid color.  Gradients
+            // go through the tessellated path.
+            if (sdfRadii(corners)) |radii| {
+                if (opts.color == .color) {
+                    dvui.renderSdfRect(.{
+                        .pos = .{ .x = self.x, .y = self.y },
+                        .size = .{ .w = self.w, .h = self.h },
+                        .radii = radii,
+                        .fill_color = opts.color.color,
+                        .border_color = dvui.Color{ .r = 0, .g = 0, .b = 0, .a = 0 },
+                        .border_width = 0,
+                        // `fade` carries the edge softness: ~1 for normal AA, larger
+                        // for soft drop shadows.
+                        .softness = @max(1.0, opts.fade),
+                    }) catch |err| {
+                        dvui.log.err("SDF fill error: {}", .{err});
+                    };
+                    return;
+                }
             }
             var path: dvui.Path.Builder = .init(dvui.currentWindow().lifo());
             defer path.deinit();
 
-            path.addRect(self, radius);
+            path.addRect(self, corners);
             path.build().fillConvex(opts);
+        }
+
+        /// The SDF pipeline only draws plain round corners.  Returns the radii in
+        /// `dvui.SdfRect.radii` layout (x=top-left, y=top-right, w=bottom-right,
+        /// h=bottom-left) when every corner is `.round` and at least one has a
+        /// radius; null means fall back to tessellation (theme / square / chamfer
+        /// / angular / nudge corners).
+        fn sdfRadii(corners: CornerRect.Physical) ?Rect.Physical {
+            inline for (.{ corners.tl, corners.tr, corners.br, corners.bl }) |c| {
+                if (c.kind != .round) return null;
+            }
+            const radii: Rect.Physical = .{
+                .x = @max(0, corners.tl.rx),
+                .y = @max(0, corners.tr.rx),
+                .w = @max(0, corners.br.rx),
+                .h = @max(0, corners.bl.rx),
+            };
+            return if (radii.nonZero()) radii else null;
         }
 
         /// True if self would be modified when clipped by r.

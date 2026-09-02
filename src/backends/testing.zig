@@ -214,22 +214,33 @@ fn sampleNearest(pixels: [*]const u8, width: u32, height: u32, u: f32, v: f32) d
 
 /// Create a texture from the given pixels in RGBA.  The returned
 /// pointer is what will later be passed to drawClippedTriangles.
-pub fn textureCreate(self: *TestingBackend, pixels: [*]const u8, width: u32, height: u32, _: dvui.enums.TextureInterpolation, format: dvui.enums.TexturePixelFormat) !dvui.Texture {
-    const new_pixels = self.allocator.dupe(u8, pixels[0 .. width * height * 4]) catch @panic("Couldn't create texture: OOM");
+pub fn textureCreate(self: *TestingBackend, pixels: [*]const u8, options: dvui.Texture.CreateOptions) !dvui.Texture {
+    const new_pixels = self.allocator.dupe(u8, pixels[0 .. options.width * options.height * 4]) catch @panic("Couldn't create texture: OOM");
     return .{
-        .width = width,
-        .height = height,
+        .width = options.width,
+        .height = options.height,
         .ptr = new_pixels.ptr,
-        .format = format,
+        .format = options.format,
+        .interpolation = options.interpolation,
+        .wrap_u = options.wrap_u,
+        .wrap_v = options.wrap_v,
     };
 }
 
 /// Create a texture that can be rendered to with renderTarget().  The
 /// returned pointer is what will later be passed to drawClippedTriangles.
-pub fn textureCreateTarget(self: *TestingBackend, width: u32, height: u32, _: dvui.enums.TextureInterpolation, _: dvui.enums.TexturePixelFormat) !dvui.TextureTarget {
-    const buffer = self.allocator.alloc(u8, width * height * 4) catch return error.TextureCreate;
+pub fn textureCreateTarget(self: *TestingBackend, options: dvui.Texture.CreateOptions) !dvui.TextureTarget {
+    const buffer = self.allocator.alloc(u8, options.width * options.height * 4) catch return error.TextureCreate;
     @memset(buffer, 0);
-    return .{ .ptr = buffer.ptr, .width = width, .height = height, .format = .rgba_32 };
+    return .{
+        .ptr = buffer.ptr,
+        .width = options.width,
+        .height = options.height,
+        .format = options.format,
+        .interpolation = options.interpolation,
+        .wrap_u = options.wrap_u,
+        .wrap_v = options.wrap_v,
+    };
 }
 
 pub fn textureClearTarget(_: *TestingBackend, texture: dvui.TextureTarget) void {
@@ -260,11 +271,11 @@ pub fn textureDestroyTarget(self: *TestingBackend, texture: dvui.Texture.Target)
 }
 
 pub fn textureFromTarget(_: *TestingBackend, texture: dvui.TextureTarget) !dvui.Texture {
-    return .{ .ptr = texture.ptr, .width = texture.width, .height = texture.height, .format = texture.format };
+    return .cast(texture);
 }
 
 pub fn textureFromTargetTemp(_: *TestingBackend, texture: dvui.TextureTarget) !dvui.Texture {
-    return .{ .ptr = texture.ptr, .width = texture.width, .height = texture.height, .format = texture.format };
+    return .cast(texture);
 }
 
 /// Render future drawClippedTriangles() to the passed texture (or screen
@@ -277,6 +288,10 @@ pub fn renderTarget(self: *TestingBackend, target: ?dvui.TextureTarget) !void {
         self.render_target = null;
     }
 }
+
+pub fn setCursor(_: *TestingBackend, _: dvui.enums.Cursor) void {}
+pub fn textInputRect(_: *TestingBackend, _: ?dvui.Rect.Natural) void {}
+pub fn renderPresent(_: *TestingBackend) void {}
 
 /// Get clipboard content (text only)
 pub fn clipboardText(self: *TestingBackend) std.mem.Allocator.Error![]const u8 {
@@ -333,7 +348,7 @@ test "cpu raster capture" {
             });
             defer outer.deinit();
             dvui.label(@src(), "Hello DVUI", .{}, .{ .color_text = .{ .r = 240, .g = 240, .b = 255, .a = 255 } });
-            _ = dvui.button(@src(), "Click me", .{}, .{ .corner_radius = dvui.Rect.all(6) });
+            _ = dvui.button(@src(), "Click me", .{}, .{ .corners = .all(6) });
             return .ok;
         }
     };
@@ -358,7 +373,7 @@ test "capture text entry" {
                 .min_size_content = .{ .w = 150, .h = 18 },
                 .padding = dvui.Rect.all(10),
                 .border = dvui.Rect.all(2),
-                .corner_radius = dvui.Rect.all(8),
+                .corners = .all(8),
                 .margin = dvui.Rect.all(12),
                 .color_fill = .{ .r = 245, .g = 245, .b = 245, .a = 255 },
                 .color_border = .{ .r = 110, .g = 180, .b = 255, .a = 255 },

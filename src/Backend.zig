@@ -42,7 +42,13 @@ pub fn sleep(self: Backend, ns: u64) void {
 /// temporary allocations needed only for this frame.
 pub fn begin(self: Backend, arena: std.mem.Allocator) GenericError!void {
     try self.impl.begin(arena);
-    if (dvui.render_backend.kind != .default) try self.render_impl.begin(arena);
+    if (dvui.render_backend.kind != .default) {
+        if (@hasDecl(dvui.render_backend, "beginWithSize")) {
+            try self.render_impl.beginWithSize(arena, self.impl.pixelSize());
+        } else {
+            try self.render_impl.begin(arena);
+        }
+    }
 }
 
 /// Called during `dvui.Window.end` before freeing any memory for the current frame.
@@ -63,10 +69,12 @@ pub fn windowSize(self: Backend) dvui.Size.Natural {
     return self.impl.windowSize();
 }
 
-/// Return the detected additional scaling.  This represents the user's
-/// additional display scaling (usually set in their window system's
-/// settings).  Currently only called during `dvui.Window.init`, so currently
-/// this sets the initial content scale.
+/// Return current system content scaling.  This is separate from pixel scaling
+/// (like retina screens), which dvui gets from pixelSize()/windowSize().
+///
+/// This is usually set by the user in their window system settings.  It can
+/// change if the user changes it (rare), or if a window moves from one monitor
+/// to another.
 pub fn contentScale(self: Backend) f32 {
     return self.impl.contentScale();
 }
@@ -107,24 +115,30 @@ fn drawSdfRectFallback(self: Backend, sdf_rect: dvui.SdfRect, clipr: ?dvui.Rect.
     _ = self;
     _ = clipr;
     const rect: dvui.Rect.Physical = .{ .x = sdf_rect.pos.x, .y = sdf_rect.pos.y, .w = sdf_rect.size.w, .h = sdf_rect.size.h };
+    const corners: dvui.CornerRect.Physical = .{
+        .tl = .round(sdf_rect.radii.x),
+        .tr = .round(sdf_rect.radii.y),
+        .br = .round(sdf_rect.radii.w),
+        .bl = .round(sdf_rect.radii.h),
+    };
     if (sdf_rect.fill_color.a > 0) {
         var path: dvui.Path.Builder = .init(dvui.currentWindow().lifo());
         defer path.deinit();
-        path.addRect(rect, sdf_rect.radii);
-        path.build().fillConvex(.{ .color = sdf_rect.fill_color, .fade = @max(1.0, sdf_rect.softness) });
+        path.addRect(rect, corners);
+        path.build().fillConvex(.{ .color = .{ .color = sdf_rect.fill_color }, .fade = @max(1.0, sdf_rect.softness) });
     }
     if (sdf_rect.border_width > 0 and sdf_rect.border_color.a > 0) {
         var path: dvui.Path.Builder = .init(dvui.currentWindow().lifo());
         defer path.deinit();
-        path.addRect(rect, sdf_rect.radii);
-        path.build().stroke(.{ .thickness = sdf_rect.border_width, .color = sdf_rect.border_color, .closed = true });
+        path.addRect(rect, corners);
+        path.build().stroke(.{ .thickness = sdf_rect.border_width, .color = .{ .color = sdf_rect.border_color }, .closed = true });
     }
 }
 
 /// Create a `dvui.Texture` from premultiplied alpha `pixels` in RGBA.  The
 /// returned pointer is what will later be passed to `drawClippedTriangles`.
-pub fn textureCreate(self: Backend, pixels: [*]const u8, width: u32, height: u32, interpolation: dvui.enums.TextureInterpolation, format: dvui.enums.TexturePixelFormat) TextureError!dvui.Texture {
-    return self.renderer().textureCreate(pixels, width, height, interpolation, format);
+pub fn textureCreate(self: Backend, pixels: [*]const u8, options: dvui.Texture.CreateOptions) TextureError!dvui.Texture {
+    return self.renderer().textureCreate(pixels, options);
 }
 
 /// Update a `dvui.Texture` from premultiplied alpha `pixels` in RGBA.  The
@@ -156,8 +170,8 @@ pub fn textureDestroy(self: Backend, texture: dvui.Texture) void {
 
 /// Create a `dvui.Texture` that can be rendered to with `renderTarget`.  The
 /// returned pointer is what will later be passed to `drawClippedTriangles`.
-pub fn textureCreateTarget(self: Backend, width: u32, height: u32, interpolation: dvui.enums.TextureInterpolation, format: dvui.enums.TexturePixelFormat) TextureError!dvui.TextureTarget {
-    return self.renderer().textureCreateTarget(width, height, interpolation, format);
+pub fn textureCreateTarget(self: Backend, options: dvui.Texture.CreateOptions) TextureError!dvui.TextureTarget {
+    return self.renderer().textureCreateTarget(options);
 }
 
 /// Read pixel data (RGBA) from `texture` into `pixels_out`.
@@ -203,9 +217,38 @@ fn renderer(self: Backend) if (dvui.render_backend.kind == .default) *Implementa
         self.render_impl;
 }
 
+/// Set the cursor based on dvui's request.
+///
+/// Called by `dvui.Window.end` by default. See `dvui.Window.endOptions`
+pub fn setCursor(self: Backend, cursor: dvui.enums.Cursor) void {
+    self.impl.setCursor(cursor);
+}
+/// Manage text input.
+///
+/// Called by `dvui.Window.end` by default. See `dvui.Window.endOptions`
+pub fn textInputRect(self: Backend, rect: ?dvui.Rect.Natural) void {
+    self.impl.textInputRect(rect);
+}
+/// Render the Window to the OS now.
+///
+/// Called by `dvui.Window.end` by default. See `dvui.Window.endOptions`
+pub fn renderPresent(self: Backend) void {
+    if (dvui.render_backend.kind != .default and @hasDecl(dvui.render_backend, "renderPresent")) {
+        self.render_impl.renderPresent();
+    }
+    self.impl.renderPresent();
+}
+
 /// Get clipboard content (text only)
 pub fn clipboardText(self: Backend) GenericError![]const u8 {
     return try self.impl.clipboardText();
+}
+
+/// Get the primary-selection text (X11/Wayland middle-click buffer).
+/// Empty on unsupported backends.
+pub fn primarySelectionText(self: Backend) GenericError![]const u8 {
+    if (comptime !@hasDecl(Implementation, "primarySelectionText")) return &.{};
+    return try self.impl.primarySelectionText();
 }
 
 /// Set clipboard content (text only)
@@ -247,6 +290,7 @@ pub fn accessKitInitInBegin(self: Backend, accessKit: *dvui.AccessKit) GenericEr
     }
 }
 
+/// Get native OS window handle.
 pub fn native(self: Backend, window: *dvui.Window) dvui.Window.Native {
     if (comptime !@hasDecl(Implementation, "native")) {
         return switch (builtin.os.tag) {
@@ -257,6 +301,49 @@ pub fn native(self: Backend, window: *dvui.Window) dvui.Window.Native {
     } else {
         return self.impl.native(window);
     }
+}
+
+/// Set OS window title.
+pub fn title(self: Backend, window: *dvui.Window, new_title: []const u8) void {
+    if (comptime @hasDecl(Implementation, "title")) {
+        self.impl.title(window, new_title);
+    } else {
+        dvui.log.debug("title: unimplemented in backend {s}", .{@tagName(kind)});
+    }
+}
+
+/// Set the OS window state (fullscreen, maximize, normal).
+pub fn windowStateSet(self: Backend, window: *dvui.Window, state: dvui.enums.WindowState) void {
+    if (comptime @hasDecl(Implementation, "windowStateSet")) {
+        self.impl.windowStateSet(window, state);
+    } else {
+        dvui.log.debug("windowStateSet: unimplemented in backend {s}", .{@tagName(kind)});
+    }
+}
+
+// We need a comptime support flag per Backend, and the argument type is not obvious at call site so
+// check expectation while we are at it.
+pub const support_child_os_wins = if (@hasDecl(Implementation, "initWindowSecondary"))
+    if (initWindowSecondarySignatureCheck())
+        true
+    else
+        @compileError(std.fmt.comptimePrint(
+            \\ Wrong signature for `initWindowSecondary` in {t} backend.
+            \\ If you are **not** trying to support `OsWindowWidget`, use another name for whatever you are doing ;-)
+        , .{dvui.backend.kind}))
+else
+    false;
+fn initWindowSecondarySignatureCheck() bool {
+    const info = @typeInfo(@TypeOf(Implementation.initWindowSecondary)).@"fn";
+    if (info.params.len != 2 or
+        info.params[0].type != *Implementation or
+        info.params[1].type != dvui.OsWindowWidget.InitOptions)
+        return false;
+    if (info.return_type == null or // Doesn't return anything
+        info.return_type.? == Implementation or // Doesn't return error union
+        @typeInfo(info.return_type.?).error_union.payload != Implementation) // Doesn't return the right things
+        return false;
+    return true;
 }
 
 test {

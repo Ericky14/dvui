@@ -4,6 +4,8 @@ const dvui = @import("dvui.zig");
 const Color = dvui.Color;
 const Font = dvui.Font;
 const Rect = dvui.Rect;
+const Corner = dvui.Corner;
+const CornerRect = dvui.CornerRect;
 const Size = dvui.Size;
 const Theme = dvui.Theme;
 const Ninepatch = dvui.Ninepatch;
@@ -55,14 +57,15 @@ gravity_y: ?f32 = null,
 /// * 0 disables (cannot focus via keyboard navigation)
 tab_index: ?u16 = null,
 
-// Used to override the style/theme.
-color_fill: ?Color = null,
-color_fill_hover: ?Color = null,
-color_fill_press: ?Color = null,
-color_text: ?Color = null,
-color_text_hover: ?Color = null,
-color_text_press: ?Color = null,
-color_border: ?Color = null,
+// Used to override the style/theme. `color_fill*`/`color_text*`/`color_border`
+// can each be a flat color or a gradient (see `ColorOrGradient`).
+color_fill: ?ColorOrGradient = null,
+color_fill_hover: ?ColorOrGradient = null,
+color_fill_press: ?ColorOrGradient = null,
+color_text: ?ColorOrGradient = null,
+color_text_hover: ?ColorOrGradient = null,
+color_text_press: ?ColorOrGradient = null,
+color_border: ?ColorOrGradient = null,
 
 ninepatch_fill: ?*const Ninepatch = null,
 ninepatch_hover: ?*const Ninepatch = null,
@@ -87,8 +90,7 @@ margin: ?Rect = null,
 border: ?Rect = null,
 padding: ?Rect = null,
 
-// x topleft, y topright, w botright, h botleft
-corner_radius: ?Rect = null,
+corners: ?CornerRect = null,
 
 /// Widget min size will be at least this, unless max_size_content is smaller.
 ///
@@ -107,6 +109,8 @@ background: ?bool = null,
 
 /// Render a box shadow in `WidgetData.borderAndBackground`.
 box_shadow: ?BoxShadow = null,
+
+const ColorOrGradient = dvui.ColorOrGradient;
 
 pub const LabelOpts = union(enum) {
     /// Use the label from a different widget.  This is preferred if there is a
@@ -191,9 +195,8 @@ pub const BoxShadow = struct {
     /// Color of shadow
     color: Color = .black,
 
-    // x topleft, y topright, w botright, h botleft
-    // if null uses Options.corner_radius
-    corner_radius: ?Rect = null,
+    // if null uses Options.corners
+    corners: ?CornerRect = null,
 
     /// Shrink the shadow on all sides (before fade)
     shrink: f32 = 0,
@@ -219,19 +222,29 @@ pub const ColorAsk = enum {
     border,
 };
 
-/// Get a color from this Options or fallback to theme colors.
+/// Get a color (or gradient) from this Options or fallback to theme colors.
+/// Hover/press auto-adjustment (see `Theme.adjustColorForState`) only
+/// applies when the fallback source is a flat color -- gradients don't get
+/// an automatic hover/press adjustment.
 ///
 /// Only valid between `Window.begin`and `Window.end`.
-pub fn color(self: *const Options, ask: ColorAsk) Color {
+pub fn color(self: *const Options, ask: ColorAsk) ColorOrGradient {
     return switch (ask) {
         .border => self.color_border,
         .fill => self.color_fill,
-        .fill_hover => self.color_fill_hover orelse if (self.color_fill) |col| self.themeGet().adjustColorForState(col, ask) else null,
-        .fill_press => self.color_fill_press orelse if (self.color_fill) |col| self.themeGet().adjustColorForState(col, ask) else null,
+        .fill_hover => self.color_fill_hover orelse if (self.color_fill) |cog| adjustColorOrGradientForState(self, cog, ask) else null,
+        .fill_press => self.color_fill_press orelse if (self.color_fill) |cog| adjustColorOrGradientForState(self, cog, ask) else null,
         .text => self.color_text,
-        .text_hover => self.color_text_hover orelse self.color_text,
-        .text_press => self.color_text_press orelse self.color_text,
-    } orelse self.themeGet().color(self.styleGet(), ask);
+        .text_hover => self.color_text_hover orelse if (self.color_text) |cog| adjustColorOrGradientForState(self, cog, ask) else null,
+        .text_press => self.color_text_press orelse if (self.color_text) |cog| adjustColorOrGradientForState(self, cog, ask) else null,
+    } orelse ColorOrGradient{ .color = self.themeGet().color(self.styleGet(), ask) };
+}
+
+fn adjustColorOrGradientForState(self: *const Options, cog: ColorOrGradient, ask: ColorAsk) ColorOrGradient {
+    return switch (cog) {
+        .color => |c| .{ .color = self.themeGet().adjustColorForState(c, ask) },
+        .gradient => cog,
+    };
 }
 
 /// Kinds of Ninepatch you can ask Options for.
@@ -284,12 +297,13 @@ pub fn paddingGet(self: *const Options) Rect {
     return self.padding orelse Rect{};
 }
 
-pub fn corner_radiusGet(self: *const Options) Rect {
-    return self.corner_radius orelse Rect{};
+pub fn cornersGet(self: *const Options) CornerRect {
+    return self.corners orelse CornerRect{};
 }
 
+/// Combines min_size_content and max_size_content, adds margin/border/padding.
 pub fn min_sizeGet(self: *const Options) Size {
-    return self.padSize(self.min_size_contentGet());
+    return self.padSize(self.min_size_contentGet().min(self.max_size_contentGet()));
 }
 
 pub fn min_size_contentGet(self: *const Options) Size {
@@ -353,7 +367,7 @@ pub fn styleOnly(self: *const Options) Options {
 // - border
 // - background
 // - padding
-// - corner_radius
+// - corners
 // - expand
 // - gravity
 // while the label uses:
@@ -382,7 +396,7 @@ pub fn strip(self: *const Options) Options {
         .margin = Rect{},
         .border = Rect{},
         .padding = Rect{},
-        .corner_radius = Rect{},
+        .corners = CornerRect{},
         .background = false,
         .ninepatch_fill = &Ninepatch.none,
         .ninepatch_hover = &Ninepatch.none,
@@ -417,24 +431,6 @@ pub fn override(self: *const Options, over: Options) Options {
     return ret;
 }
 
-/// Override corner_radius with maximum from theme.
-/// Pass null to use theme from this Options.
-/// If about to override with passed Options, use that Options.theme.
-pub fn themeOverride(self: *const Options, theme: ?*const Theme) Options {
-    var ret = self.*;
-    const t: *const Theme = theme orelse self.themeGet();
-    if (t.max_default_corner_radius) |mdcr| {
-        if (ret.corner_radius != null) {
-            ret.corner_radius.?.x = @min(ret.corner_radius.?.x, mdcr);
-            ret.corner_radius.?.y = @min(ret.corner_radius.?.y, mdcr);
-            ret.corner_radius.?.w = @min(ret.corner_radius.?.w, mdcr);
-            ret.corner_radius.?.h = @min(ret.corner_radius.?.h, mdcr);
-        }
-    }
-
-    return ret;
-}
-
 pub fn min_sizeM(self: *const Options, wide: f32, tall: f32) Options {
     return self.override(.{ .min_size_content = self.fontGet().sizeM(wide, tall) });
 }
@@ -462,7 +458,7 @@ pub fn hash(self: *const Options) u64 {
     hasher.update(asBytes(&self.marginGet()));
     hasher.update(asBytes(&self.paddingGet()));
 
-    hasher.update(asBytes(&self.corner_radiusGet()));
+    hasher.update(asBytes(&self.cornersGet()));
     hasher.update(asBytes(&self.gravityGet()));
     hasher.update(asBytes(&self.expandGet()));
     hasher.update(asBytes(&self.rotationGet()));

@@ -4,20 +4,73 @@ var layout_padding: Rect = Rect.all(4);
 var layout_gravity_x: f32 = 0.5;
 var layout_gravity_y: f32 = 0.5;
 var layout_rotation: f32 = 0;
-var layout_corner_radius: Rect = Rect.all(5);
+var layout_corners: CornerRect = .all(5);
+var corner_style: Corner.Style = .theme;
 var layout_flex_content_justify: dvui.FlexBoxWidget.ContentPosition = .center;
 var layout_expand: dvui.Options.Expand = .none;
 var paned_collapsed_width: f32 = 400;
 var paned_autofit_direction: dvui.enums.Direction = .vertical;
+
+fn tabDir() void {
+    var te = dvui.textEntry(@src(), .{}, .{ .expand = .horizontal });
+    te.deinit();
+
+    {
+        var box = dvui.box(@src(), .{}, .{ .min_size_content = .height(160), .margin = .all(20), .expand = .horizontal, .gravity_x = 0.5 });
+        defer box.deinit();
+
+        _ = dvui.button(@src(), "Up", .{}, .{ .gravity_x = 0.5 });
+        _ = dvui.button(@src(), "Down", .{}, .{ .gravity_x = 0.5, .gravity_y = 1.0 });
+        _ = dvui.button(@src(), "Left", .{}, .{ .gravity_y = 0.5 });
+        _ = dvui.button(@src(), "Right", .{}, .{ .gravity_x = 1.0, .gravity_y = 0.5 });
+    }
+
+    if (dvui.expander(@src(), "Expander", .{}, .{ .expand = .horizontal })) {
+        var fbox = dvui.flexbox(@src(), .{ .justify_content = .start }, .{});
+        defer fbox.deinit();
+
+        _ = dvui.button(@src(), "One", .{}, .{});
+        _ = dvui.button(@src(), "Another", .{}, .{});
+        _ = dvui.button(@src(), "Z", .{}, .{});
+        _ = dvui.button(@src(), "A Very Long One", .{}, .{});
+        _ = dvui.button(@src(), "Another Long One", .{}, .{});
+        _ = dvui.button(@src(), "Two", .{}, .{});
+        _ = dvui.button(@src(), "Three", .{}, .{});
+        _ = dvui.button(@src(), "Z", .{}, .{});
+    }
+
+    if (dvui.expander(@src(), "Expander", .{}, .{ .expand = .horizontal })) {
+        var fbox = dvui.flexbox(@src(), .{}, .{});
+        defer fbox.deinit();
+
+        _ = dvui.button(@src(), "A Very Long One", .{}, .{});
+        _ = dvui.button(@src(), "Another Long One", .{}, .{});
+        _ = dvui.button(@src(), "One", .{}, .{});
+        _ = dvui.button(@src(), "Two", .{}, .{});
+        _ = dvui.button(@src(), "Three", .{}, .{});
+        _ = dvui.button(@src(), "Z", .{}, .{});
+        _ = dvui.button(@src(), "Z", .{}, .{});
+        _ = dvui.button(@src(), "A Very Long One", .{}, .{});
+        _ = dvui.button(@src(), "Z", .{}, .{});
+    }
+}
 
 /// ![image](Examples-layout.png)
 pub fn layout() void {
     {
         const uniqId = dvui.parentGet().extendId(@src(), 0);
         const show_dialog = dvui.dataGetPtrDefault(null, uniqId, "show_dialog", bool, false);
+        const show_tab_dir = dvui.dataGetPtrDefault(null, uniqId, "show_tab_dir", bool, false);
+
+        var hbox = dvui.box(@src(), .{ .dir = .horizontal }, .{});
+        defer hbox.deinit();
 
         if (dvui.button(@src(), "Dialog Style\nLayout", .{}, .{})) {
             show_dialog.* = !show_dialog.*;
+        }
+
+        if (dvui.button(@src(), "Directional\nNavigation", .{}, .{})) {
+            show_tab_dir.* = !show_tab_dir.*;
         }
 
         if (show_dialog.*) {
@@ -41,13 +94,13 @@ pub fn layout() void {
             }
 
             {
-                var box_bottom = dvui.box(@src(), .{}, .{ .gravity_y = 1.0, .border = .all(1), .gravity_x = 0.5 });
+                var box_bottom = dvui.box(@src(), .{}, .{ .gravity_y = 1.0, .border = .all(1), .gravity_x = 1.0 });
                 defer box_bottom.deinit();
 
                 dvui.label(@src(), "Step 2: non-expanded stuff at the bottom (gravity_y = 1.0)", .{}, .{});
                 dvui.label(@src(), "Note: these buttons will switch order depending on platform", .{}, .{});
 
-                var box_bottom_buttons = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_x = 0.5 });
+                var box_bottom_buttons = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_x = 1.0 });
                 defer box_bottom_buttons.deinit();
 
                 const gravx: f32, const tindex: u16 = switch (dvui.currentWindow().button_order) {
@@ -68,6 +121,30 @@ pub fn layout() void {
                 tl.addText("Use dvui.dialog() for a fire-and-forget version of this kind of thing.\n\n", .{});
                 tl.addText("Here is some\ntext on a\nfew lines\nto show\nscrolling\nif needed.", .{});
             }
+        }
+
+        if (show_tab_dir.*) {
+            var fw = dvui.floatingWindow(@src(), .{}, .{ .min_size_content = .{ .w = 300, .h = 600 } });
+            defer fw.deinit();
+
+            _ = dvui.windowHeader("Directional Keyboard Focus", "", show_tab_dir);
+
+            dvui.label(@src(), "Use arrow keys to move focus", .{}, .{});
+
+            {
+                const open = dvui.dataGetPtrDefault(null, fw.data().id, "popup_open", bool, false);
+                if (dvui.button(@src(), "Popup", .{}, .{}))
+                    open.* = true;
+
+                if (dvui.popup(@src(), .{ .open_flag = open }, .{ .min_size_content = .width(200), .max_size_content = .width(200) })) |p| {
+                    tabDir();
+                    p.deinit();
+
+                    if (open.* == false) dvui.log.debug("popup closed", .{});
+                }
+            }
+
+            tabDir();
         }
     }
     {
@@ -116,7 +193,8 @@ pub fn layout() void {
             const old_clip = dvui.clip(o.data().backgroundRectScale().r);
             defer dvui.clipSet(old_clip);
 
-            const options: Options = .{ .gravity_x = layout_gravity_x, .gravity_y = layout_gravity_y, .expand = layout_expand, .rotation = layout_rotation, .corner_radius = layout_corner_radius };
+            const options: Options = .{ .gravity_x = layout_gravity_x, .gravity_y = layout_gravity_y, .expand = layout_expand, .rotation = layout_rotation, .corners = layout_corners };
+
             if (Static.img) {
                 _ = dvui.image(@src(), .{
                     .source = .{ .imageFile = .{ .bytes = Examples.zig_favicon, .name = "zig favicon" } },
@@ -145,8 +223,41 @@ pub fn layout() void {
             _ = dvui.sliderEntry(@src(), "X: {d:0.2}", .{ .value = &layout_gravity_x, .min = 0, .max = 1.0, .interval = 0.01 }, .{});
             _ = dvui.sliderEntry(@src(), "Y: {d:0.2}", .{ .value = &layout_gravity_y, .min = 0, .max = 1.0, .interval = 0.01 }, .{});
             dvui.label(@src(), "Corner Radius", .{}, .{});
-            inline for (0.., @typeInfo(dvui.Rect).@"struct".fields) |i, field| {
-                _ = dvui.sliderEntry(@src(), field.name ++ ": {d:0}", .{ .min = 0, .max = 200, .interval = 1, .value = &@field(layout_corner_radius, field.name) }, .{ .id_extra = i });
+            {
+                var hbox_slider = dvui.box(@src(), .{ .dir = .horizontal }, .{});
+                defer hbox_slider.deinit();
+                dvui.label(@src(), "TL:", .{}, .{});
+                _ = dvui.sliderEntry(@src(), "rx: {d:0}", .{ .min = 0, .max = 100, .interval = 1, .value = &layout_corners.tl.rx }, .{ .min_size_content = .width(60) });
+                _ = dvui.sliderEntry(@src(), "y: {d:0}", .{ .min = 0, .max = 100, .interval = 1, .value = &layout_corners.tl.y }, .{ .min_size_content = .width(60) });
+            }
+            {
+                var hbox_slider = dvui.box(@src(), .{ .dir = .horizontal }, .{});
+                defer hbox_slider.deinit();
+                dvui.label(@src(), "TR:", .{}, .{});
+                _ = dvui.sliderEntry(@src(), "rx: {d:0}", .{ .min = 0, .max = 100, .interval = 1, .value = &layout_corners.tr.rx }, .{ .min_size_content = .width(60) });
+                _ = dvui.sliderEntry(@src(), "y: {d:0}", .{ .min = 0, .max = 100, .interval = 1, .value = &layout_corners.tr.y }, .{ .min_size_content = .width(60) });
+            }
+            {
+                var hbox_slider = dvui.box(@src(), .{ .dir = .horizontal }, .{});
+                defer hbox_slider.deinit();
+                dvui.label(@src(), "BR:", .{}, .{});
+                _ = dvui.sliderEntry(@src(), "rx: {d:0}", .{ .min = 0, .max = 100, .interval = 1, .value = &layout_corners.br.rx }, .{ .min_size_content = .width(60) });
+                _ = dvui.sliderEntry(@src(), "y: {d:0}", .{ .min = 0, .max = 100, .interval = 1, .value = &layout_corners.br.y }, .{ .min_size_content = .width(60) });
+            }
+            {
+                var hbox_slider = dvui.box(@src(), .{ .dir = .horizontal }, .{});
+                defer hbox_slider.deinit();
+                dvui.label(@src(), "BL:", .{}, .{});
+                _ = dvui.sliderEntry(@src(), "rx: {d:0}", .{ .min = 0, .max = 100, .interval = 1, .value = &layout_corners.bl.rx }, .{ .min_size_content = .width(60) });
+                _ = dvui.sliderEntry(@src(), "y: {d:0}", .{ .min = 0, .max = 100, .interval = 1, .value = &layout_corners.bl.y }, .{ .min_size_content = .width(60) });
+            }
+
+            dvui.label(@src(), "Corner Style:", .{}, .{});
+            if (dvui.dropdownEnum(@src(), Corner.Style, .{ .choice = &corner_style }, .{}, .{ .min_size_content = .{ .w = 150 } })) {
+                layout_corners.tl.kind = corner_style;
+                layout_corners.tr.kind = corner_style;
+                layout_corners.bl.kind = corner_style;
+                layout_corners.br.kind = corner_style;
             }
             if (Static.img) {
                 dvui.label(@src(), "Rotation", .{}, .{});
@@ -292,6 +403,8 @@ pub fn layout() void {
         }
     }
     {
+        const uniqId = dvui.parentGet().extendId(@src(), 0);
+        const focusable = dvui.dataGetPtrDefault(null, uniqId, "focusable", bool, false);
         _ = dvui.spacer(@src(), .{ .min_size_content = .height(12) });
         {
             var hbox2 = dvui.box(@src(), .{ .dir = .horizontal }, .{});
@@ -302,6 +415,10 @@ pub fn layout() void {
                     layout_flex_content_justify = opt;
                 }
             }
+
+            _ = dvui.spacer(@src(), .{ .min_size_content = .width(12) });
+
+            _ = dvui.checkbox(@src(), focusable, "Focusable", .{});
         }
         dvui.label(@src(), "Uses flexbox border_collapse and row/col.", .{}, .{});
         {
@@ -312,14 +429,23 @@ pub fn layout() void {
             }, .{
                 .border = dvui.Rect.all(1),
                 .background = true,
-                .padding = .{ .w = 4, .h = 4 },
                 .expand = .horizontal,
             });
             defer fbox.deinit();
 
+            var fg: ?*dvui.FocusGroupWidget = null;
+            if (focusable.*) fg = dvui.focusGroup(@src(), .{}, .{});
+            defer if (fg) |fgg| fgg.deinit();
+
             for (0..20) |i| {
                 // container must run first so fbox updates row/col
                 var container = dvui.box(@src(), .{}, .{ .id_extra = i });
+                if (focusable.*) {
+                    dvui.tabIndexSet(container.data().id, null, container.data().rectScale().r);
+                    if (container.data().id == dvui.focusedWidgetId()) {
+                        container.data().focusBorder();
+                    }
+                }
                 defer container.deinit();
 
                 // now fbox.row/col are correct
@@ -425,4 +551,6 @@ const dvui = @import("../dvui.zig");
 const Examples = @import("../Examples.zig");
 const Size = dvui.Size;
 const Rect = dvui.Rect;
+const CornerRect = dvui.CornerRect;
+const Corner = dvui.Corner;
 const Options = dvui.Options;

@@ -24,7 +24,7 @@ pub var defaults: Options = .{
     .name = "TextEntry",
     .role = .text_input, // can change to multiline in init
     .margin = Rect.all(4),
-    .corner_radius = Rect.all(5),
+    .corners = .default,
     .border = Rect.all(1),
     .padding = Rect.all(6),
     .background = true,
@@ -34,95 +34,7 @@ pub var defaults: Options = .{
 
 const realloc_bin_size = 100;
 
-pub const SyntaxHighlight = struct {
-    name: []const u8,
-    opts: dvui.Options,
-};
-
-pub const TreeSitterParser = if (dvui.useTreeSitter) struct {
-    parser: *dvui.c.TSParser,
-    tree: *dvui.c.TSTree,
-    query: *dvui.c.TSQuery,
-
-    pub fn deinit(ptr: *anyopaque) void {
-        const self: *@This() = @ptrCast(@alignCast(ptr));
-
-        dvui.c.ts_query_delete(self.query);
-        dvui.c.ts_tree_delete(self.tree);
-        dvui.c.ts_parser_delete(self.parser);
-    }
-
-    pub fn queryCursorCaptureIterator(self: *const TreeSitterParser, qc: *dvui.c.TSQueryCursor, text: []const u8) QueryCursorCaptureIterator {
-        return .{
-            .query_cursor = qc,
-            .prev_match = null,
-            .query = self.query,
-            .text = text,
-        };
-    }
-
-    pub const QueryCursorCaptureIterator = struct {
-        pub const Match = struct {
-            iter: *const QueryCursorCaptureIterator,
-            node: dvui.c.TSNode,
-            capture_index: u32,
-
-            pub fn captureName(self: *const Match) []const u8 {
-                var len: u32 = undefined;
-                const name = dvui.c.ts_query_capture_name_for_id(self.iter.query, self.capture_index, &len);
-                return name[0..len];
-            }
-
-            pub fn debugLog(self: *const Match, comptime kind: []const u8) void {
-                const start = dvui.c.ts_node_start_byte(self.node);
-                const end = dvui.c.ts_node_end_byte(self.node);
-                dvui.log.debug(kind ++ " capture @{s} : {s}", .{ self.captureName(), self.iter.text[start..end] });
-            }
-        };
-
-        query_cursor: *dvui.c.TSQueryCursor,
-        prev_match: ?Match,
-
-        // used for debugging
-        debug: bool = false,
-        query: *dvui.c.TSQuery,
-        text: []const u8,
-
-        pub fn next(self: *QueryCursorCaptureIterator) ?Match {
-            var match: dvui.c.TSQueryMatch = undefined;
-            var captureIdx: u32 = undefined;
-            loop: while (dvui.c.ts_query_cursor_next_capture(self.query_cursor, &match, &captureIdx)) {
-                const capture = match.captures[captureIdx];
-                if (self.prev_match) |pm| {
-                    if (dvui.c.ts_node_eq(pm.node, capture.node)) {
-                        // same node as previous
-                        self.prev_match = .{ .iter = self, .node = capture.node, .capture_index = capture.index };
-                        if (self.debug) self.prev_match.?.debugLog("ts same ");
-                        continue :loop;
-                    }
-
-                    // not the same
-                    const ret = self.prev_match;
-                    self.prev_match = .{ .iter = self, .node = capture.node, .capture_index = capture.index };
-                    if (self.debug) self.prev_match.?.debugLog("ts new  ");
-                    return ret;
-                } else {
-                    // first time
-                    self.prev_match = .{ .iter = self, .node = capture.node, .capture_index = capture.index };
-                    if (self.debug) self.prev_match.?.debugLog("ts first");
-                    continue :loop;
-                }
-            }
-
-            const ret = self.prev_match;
-            if (ret) |r| {
-                if (self.debug) r.debugLog("ts last ");
-            }
-            self.prev_match = null;
-            return ret;
-        }
-    };
-} else void;
+pub const SyntaxHighlight = dvui.SyntaxHighlight;
 
 pub const InitOptions = struct {
     pub const TextOption = union(enum) {
@@ -152,16 +64,8 @@ pub const InitOptions = struct {
         },
     };
 
-    pub const TreeSitterOption = if (dvui.useTreeSitter) struct {
-        language: *dvui.c.TSLanguage,
-        queries: []const u8,
-        highlights: []const SyntaxHighlight,
-        /// If true dump all captures to dvui.log.debug
-        log_captures: bool = false,
-    } else void;
-
     text: TextOption = .{ .internal = .{} },
-    tree_sitter: ?TreeSitterOption = null,
+    tree_sitter: ?dvui.TreeSitter = null,
     /// Faded text shown when the textEntry is empty
     placeholder: ?[]const u8 = null,
     /// Optional explicit placeholder color. When null, uses text color at 65% opacity.
@@ -216,7 +120,7 @@ pub fn init(self: *TextEntryWidget, src: std.builtin.SourceLocation, init_opts: 
         .horizontal_bar = init_opts.scroll_horizontal_bar orelse (if (init_opts.multiline) .auto else .hide),
     };
 
-    var options = defaults.themeOverride(opts.theme).min_sizeM(defaultMWidth, 1);
+    var options = defaults.min_sizeM(defaultMWidth, 1);
 
     if (init_opts.password_char != null) {
         options.role = .password_input;
@@ -259,7 +163,7 @@ pub fn init(self: *TextEntryWidget, src: std.builtin.SourceLocation, init_opts: 
     }
 
     if (find_zero) {
-        const len_byte = std.mem.indexOfScalar(u8, text, 0) orelse text.len;
+        const len_byte = std.mem.findScalar(u8, text, 0) orelse text.len;
         len_utf8_boundary = dvui.findUtf8Start(text[0..len_byte], len_byte);
     }
 
@@ -333,7 +237,7 @@ pub fn init(self: *TextEntryWidget, src: std.builtin.SourceLocation, init_opts: 
         defer floating_widget.deinit();
 
         var hbox = dvui.box(@src(), .{ .dir = .horizontal }, .{
-            .corner_radius = dvui.ButtonWidget.defaults.themeOverride(opts.theme).corner_radiusGet(),
+            .corners = dvui.ButtonWidget.defaults.cornersGet(),
             .background = true,
             .border = dvui.Rect.all(1),
         });
@@ -437,7 +341,7 @@ pub fn draw(self: *TextEntryWidget) void {
             // otherwise cursor_rect lands mid-placeholder for one frame before jumping to start.
             const saved_sel_move = self.textLayout.sel_move;
             self.textLayout.sel_move = .none;
-            self.textLayout.addText(placeholder, .{ .color_text = self.init_opts.placeholder_color orelse self.textLayout.data().options.color(.text).opacity(0.65) });
+            self.textLayout.addText(placeholder, .{ .color_text = if (self.init_opts.placeholder_color) |pc| .{ .color = pc } else self.textLayout.data().options.color(.text).opacity(0.65) });
             self.textLayout.sel_move = saved_sel_move;
         }
     }
@@ -518,98 +422,44 @@ pub fn draw(self: *TextEntryWidget) void {
         return;
     }
 
+    // syntax highlighting
     if (dvui.useTreeSitter) {
         if (self.init_opts.tree_sitter) |ts| {
-            // syntax highlighting
-            var parser = dvui.dataGetPtr(null, self.data().id, "parser", TreeSitterParser) orelse blk: {
-                const p = dvui.c.ts_parser_new();
-                _ = dvui.c.ts_parser_set_language(p, ts.language);
-                const tree = dvui.c.ts_parser_parse_string(p, null, self.text.ptr, @intCast(self.len));
+            // parse is lazy
+            var iter = ts.parse(self.data().id, "parser", self.text[0..self.len]);
+            defer iter.deinit();
 
-                var errorOffset: u32 = undefined;
-                var errorType: dvui.c.TSQueryError = undefined;
-                const query = dvui.c.ts_query_new(ts.language, ts.queries.ptr, @intCast(ts.queries.len), &errorOffset, &errorType);
-
-                const parser: TreeSitterParser = .{ .parser = p.?, .tree = tree.?, .query = query.? };
-                dvui.dataSet(null, self.data().id, "parser", parser);
-                dvui.dataSetDeinitFunction(null, self.data().id, "parser", &TreeSitterParser.deinit);
-                break :blk dvui.dataGetPtr(null, self.data().id, "parser", TreeSitterParser).?;
-            };
-
-            // used to output text that's not highlighted
-            var start: usize = 0;
-
-            if (self.text_changed and !dvui.firstFrame(self.data().id)) {
-                if (self.init_opts.cache_layout) {
-                    var edit: dvui.c.TSInputEdit = undefined;
-                    edit.start_byte = @intCast(self.text_changed_start);
-                    edit.old_end_byte = @intCast(self.text_changed_end);
-                    edit.new_end_byte = @intCast(@as(i64, @intCast(self.text_changed_end)) + self.text_changed_added);
-
-                    edit.start_point = .{ .row = 0, .column = 0 };
-                    edit.old_end_point = .{ .row = 0, .column = 0 };
-                    edit.new_end_point = .{ .row = 0, .column = 0 };
-
-                    dvui.c.ts_tree_edit(parser.tree, &edit);
-
-                    const tree = dvui.c.ts_parser_parse_string(parser.parser, parser.tree, self.text.ptr, @intCast(self.len));
-                    dvui.c.ts_tree_delete(parser.tree);
-                    parser.tree = tree.?;
-                } else {
-                    const tree = dvui.c.ts_parser_parse_string(parser.parser, null, self.text.ptr, @intCast(self.len));
-                    dvui.c.ts_tree_delete(parser.tree);
-                    parser.tree = tree.?;
-                }
-            }
-
-            // parsing
-            const root = dvui.c.ts_tree_root_node(parser.tree);
-
-            // queries
-            const qc = dvui.c.ts_query_cursor_new();
-            defer dvui.c.ts_query_cursor_delete(qc);
-
-            if (self.textLayout.cache_layout_bytes) |clb| {
-                _ = dvui.c.ts_query_cursor_set_byte_range(qc, @intCast(clb.start), @intCast(clb.end));
-            }
-
-            dvui.c.ts_query_cursor_exec(qc, parser.query, root);
-
-            var iter = parser.queryCursorCaptureIterator(qc.?, self.text);
             iter.debug = ts.log_captures;
-            while (iter.next()) |match| {
-                const nstart = dvui.c.ts_node_start_byte(match.node);
-                const nend = dvui.c.ts_node_end_byte(match.node);
-                if (start < nstart) {
-                    // render non highlighted text up to this node
-                    self.textLayout.addText(self.text[start..nstart], .{});
-                } else if (nstart < start) {
-                    // this match is inside (or overlapping) the previous match
-                    // maybe we could be smarter here, but for now drop it
-                    continue;
+
+            // reparse if needed
+            if (self.text_changed and !dvui.firstFrame(self.data().id)) {
+                var edit: ?dvui.c.TSInputEdit = null;
+                if (self.init_opts.cache_layout) {
+                    edit = @as(dvui.c.TSInputEdit, undefined);
+                    edit.?.start_byte = @intCast(self.text_changed_start);
+                    edit.?.old_end_byte = @intCast(self.text_changed_end);
+                    edit.?.new_end_byte = @intCast(@as(i64, @intCast(self.text_changed_end)) + self.text_changed_added);
+
+                    edit.?.start_point = .{ .row = 0, .column = 0 };
+                    edit.?.old_end_point = .{ .row = 0, .column = 0 };
+                    edit.?.new_end_point = .{ .row = 0, .column = 0 };
                 }
 
-                var opts: dvui.Options = .{};
-                const capture_name = match.captureName();
-                for (0..ts.highlights.len) |i| {
-                    const sh = ts.highlights[ts.highlights.len - i - 1];
-                    if (std.mem.startsWith(u8, capture_name, sh.name)) {
-                        opts = sh.opts;
-                        break;
-                    }
-                }
-
-                self.textLayout.addText(self.text[nstart..nend], opts);
-
-                start = nend;
+                iter.reparse(edit);
             }
 
-            if (start < self.len) {
-                // any leftover non highlighted text
-                self.textLayout.addText(self.text[start..self.len], .{});
+            // set the bytes we need matches for
+            if (self.textLayout.cacheLayoutBytes()) |clb| {
+                iter.setByteRange(clb.start, clb.end);
             }
 
-            self.textLayout.addTextDone(self.data().options.strip());
+            // do all matches
+            const normal_opts = self.data().options.strip();
+            while (iter.next()) |h| {
+                self.textLayout.addText(h.text, h.opts orelse normal_opts);
+            }
+
+            self.textLayout.addTextDone(normal_opts);
             self.drawAfterText();
             return;
         }
@@ -705,7 +555,7 @@ pub fn drawCursor(self: *TextEntryWidget) void {
             cursor_rs.x = std.math.clamp(cursor_rs.x, text_area.x, @max(text_area.x, text_area.x + text_area.w - cursor_rs.w));
             cursor_rs.y = std.math.clamp(cursor_rs.y, text_area.y, @max(text_area.y, text_area.y + text_area.h - cursor_rs.h));
 
-            cursor_rs.fill(.{}, .{ .color = dvui.themeGet().focus, .fade = 1.0 });
+            cursor_rs.fill(.{}, .{ .color = .{ .color = dvui.themeGet().focus }, .fade = 1.0 });
         }
     }
 }
@@ -789,11 +639,14 @@ pub fn getText(self: *const TextEntryWidget) []u8 {
 pub fn textSet(self: *TextEntryWidget, text: []const u8, selected: bool) void {
     self.textLayout.selection.selectAll();
     self.textTyped(text, selected);
+
+    // setting the text programatically should not scroll
+    self.textLayout.scroll_to_cursor_next_frame = false;
 }
 
 pub fn textTyped(self: *TextEntryWidget, new: []const u8, selected: bool) void {
     // strip out carriage returns, which we get from copy/paste on windows
-    if (std.mem.indexOfScalar(u8, new, '\r')) |idx| {
+    if (std.mem.findScalar(u8, new, '\r')) |idx| {
         self.textTyped(new[0..idx], selected);
         self.textTyped(new[idx + 1 ..], selected);
         return;
@@ -803,7 +656,7 @@ pub fn textTyped(self: *TextEntryWidget, new: []const u8, selected: bool) void {
     if (!sel.empty()) {
         // delete selection
         self.textChangedRemoved(sel.start, sel.end);
-        std.mem.copyForwards(u8, self.text[sel.start..], self.text[sel.end..self.len]);
+        @memmove(self.text[sel.start..][0 .. self.len - sel.end], self.text[sel.end..self.len]);
         self.len -= (sel.end - sel.start);
         sel.end = sel.start;
         sel.cursor = sel.start;
@@ -864,7 +717,7 @@ pub fn textTyped(self: *TextEntryWidget, new: []const u8, selected: bool) void {
 
     // make room if we can
     if (new_len > 0 and sel.cursor + new_len < self.text.len) {
-        std.mem.copyBackwards(u8, self.text[sel.cursor + new_len ..], self.text[sel.cursor..self.len]);
+        @memmove(self.text[sel.cursor + new_len ..][0 .. self.len - sel.cursor], self.text[sel.cursor..self.len]);
     }
 
     if (new_len > 0) {
@@ -875,7 +728,7 @@ pub fn textTyped(self: *TextEntryWidget, new: []const u8, selected: bool) void {
     self.setLen(self.len + new_len);
 
     // insert
-    std.mem.copyForwards(u8, self.text[sel.cursor..], new[0..new_len]);
+    @memmove(self.text[sel.cursor..][0..new_len], new[0..new_len]);
     if (selected) {
         sel.start = sel.cursor;
         sel.cursor += new_len;
@@ -885,7 +738,7 @@ pub fn textTyped(self: *TextEntryWidget, new: []const u8, selected: bool) void {
         sel.end = sel.cursor;
         sel.start = sel.cursor;
     }
-    if (std.mem.indexOfScalar(u8, new[0..new_len], '\n') != null) {
+    if (std.mem.findScalar(u8, new[0..new_len], '\n') != null) {
         sel.affinity = .after;
     }
 
@@ -905,7 +758,7 @@ pub fn filterIn(self: *TextEntryWidget, filter_chars: []const u8) void {
     var j: usize = 0;
     const n = self.len;
     while (i < n) {
-        if (std.mem.indexOfScalar(u8, filter_chars, self.text[i]) == null) {
+        if (std.mem.findScalar(u8, filter_chars, self.text[i]) == null) {
             self.len -= 1;
             var sel = self.textLayout.selection;
             if (sel.start > i) sel.start -= 1;
@@ -1141,7 +994,7 @@ pub fn processEvent(self: *TextEntryWidget, e: *Event) void {
                 break :blk;
             }
 
-            if ((ke.action == .down or ke.action == .repeat) and ke.matchBind("char_up")) {
+            if (self.init_opts.multiline and (ke.action == .down or ke.action == .repeat) and ke.matchBind("char_up")) {
                 e.handle(@src(), self.data());
                 if (self.textLayout.sel_move == .none) {
                     self.textLayout.sel_move = .{ .cursor_updown = .{ .select = false } };
@@ -1152,7 +1005,7 @@ pub fn processEvent(self: *TextEntryWidget, e: *Event) void {
                 break :blk;
             }
 
-            if ((ke.action == .down or ke.action == .repeat) and ke.matchBind("char_down")) {
+            if (self.init_opts.multiline and (ke.action == .down or ke.action == .repeat) and ke.matchBind("char_down")) {
                 e.handle(@src(), self.data());
                 if (self.textLayout.sel_move == .none) {
                     self.textLayout.sel_move = .{ .cursor_updown = .{ .select = false } };
@@ -1171,22 +1024,36 @@ pub fn processEvent(self: *TextEntryWidget, e: *Event) void {
                         if (!sel.empty()) {
                             // just delete selection
                             self.textChangedRemoved(sel.start, sel.end);
-                            std.mem.copyForwards(u8, self.text[sel.start..], self.text[sel.end..self.len]);
+                            @memmove(self.text[sel.start..][0 .. self.len - sel.end], self.text[sel.end..self.len]);
                             self.setLen(self.len - (sel.end - sel.start));
                             sel.end = sel.start;
                             sel.cursor = sel.start;
+                            self.textLayout.scroll_to_cursor = true;
+                        } else if (ke.matchBind("delete_to_line_start")) {
+                            // delete from the start of the current line up to the cursor
+
+                            const oldcur = sel.cursor;
+                            // line starts just after the previous newline, or at buffer start
+                            sel.cursor = if (std.mem.findLastAny(u8, self.text[0..oldcur], "\n")) |nl| nl + 1 else 0;
+
+                            // delete from sel.cursor to oldcur
+                            if (sel.cursor != oldcur) self.textChangedRemoved(sel.cursor, oldcur);
+                            @memmove(self.text[sel.cursor..][0 .. self.len - oldcur], self.text[oldcur..self.len]);
+                            self.setLen(self.len - (oldcur - sel.cursor));
+                            sel.end = sel.cursor;
+                            sel.start = sel.cursor;
                             self.textLayout.scroll_to_cursor = true;
                         } else if (ke.matchBind("delete_prev_word")) {
                             // delete word before cursor
 
                             const oldcur = sel.cursor;
                             // find end of last word
-                            if (sel.cursor > 0 and std.mem.indexOfAny(u8, self.text[sel.cursor - 1 ..][0..1], " \n") != null) {
-                                sel.cursor = std.mem.lastIndexOfNone(u8, self.text[0..sel.cursor], " \n") orelse 0;
+                            if (sel.cursor > 0 and std.mem.findAny(u8, self.text[sel.cursor - 1 ..][0..1], " \n") != null) {
+                                sel.cursor = std.mem.findLastNone(u8, self.text[0..sel.cursor], " \n") orelse 0;
                             }
 
                             // find start of word
-                            if (std.mem.lastIndexOfAny(u8, self.text[0..sel.cursor], " \n")) |last_space| {
+                            if (std.mem.findLastAny(u8, self.text[0..sel.cursor], " \n")) |last_space| {
                                 sel.cursor = last_space + 1;
                             } else {
                                 sel.cursor = 0;
@@ -1194,7 +1061,7 @@ pub fn processEvent(self: *TextEntryWidget, e: *Event) void {
 
                             // delete from sel.cursor to oldcur
                             if (sel.cursor != oldcur) self.textChangedRemoved(sel.cursor, oldcur);
-                            std.mem.copyForwards(u8, self.text[sel.cursor..], self.text[oldcur..self.len]);
+                            @memmove(self.text[sel.cursor..][0 .. self.len - oldcur], self.text[oldcur..self.len]);
                             self.setLen(self.len - (oldcur - sel.cursor));
                             sel.end = sel.cursor;
                             sel.start = sel.cursor;
@@ -1209,7 +1076,7 @@ pub fn processEvent(self: *TextEntryWidget, e: *Event) void {
                             var i: usize = 1;
                             while (sel.cursor - i > 0 and self.text[sel.cursor - i] & 0xc0 == 0x80) : (i += 1) {}
                             self.textChangedRemoved(sel.cursor - i, sel.cursor);
-                            std.mem.copyForwards(u8, self.text[sel.cursor - i ..], self.text[sel.cursor..self.len]);
+                            @memmove(self.text[sel.cursor - i ..][0 .. self.len - sel.cursor], self.text[sel.cursor..self.len]);
                             self.setLen(self.len - i);
                             sel.cursor -= i;
                             sel.start = sel.cursor;
@@ -1225,22 +1092,37 @@ pub fn processEvent(self: *TextEntryWidget, e: *Event) void {
                         if (!sel.empty()) {
                             // just delete selection
                             self.textChangedRemoved(sel.start, sel.end);
-                            std.mem.copyForwards(u8, self.text[sel.start..], self.text[sel.end..self.len]);
+                            @memmove(self.text[sel.start..][0 .. self.len - sel.end], self.text[sel.end..self.len]);
                             self.setLen(self.len - (sel.end - sel.start));
                             sel.end = sel.start;
                             sel.cursor = sel.start;
+                            self.textLayout.scroll_to_cursor = true;
+                        } else if (ke.matchBind("delete_to_line_end")) {
+                            // delete from the cursor up to the end of the current line
+
+                            const oldcur = sel.cursor;
+                            // line ends at the next newline, or at buffer end
+                            const line_end = if (std.mem.findAny(u8, self.text[oldcur..self.len], "\n")) |rel| oldcur + rel else self.len;
+
+                            // delete from oldcur to line_end
+                            if (line_end != oldcur) self.textChangedRemoved(oldcur, line_end);
+                            @memmove(self.text[oldcur..][0 .. self.len - line_end], self.text[line_end..self.len]);
+                            self.setLen(self.len - (line_end - oldcur));
+                            sel.cursor = oldcur;
+                            sel.end = sel.cursor;
+                            sel.start = sel.cursor;
                             self.textLayout.scroll_to_cursor = true;
                         } else if (ke.matchBind("delete_next_word")) {
                             // delete word after cursor
 
                             const oldcur = sel.cursor;
                             // find start of next word
-                            if (sel.cursor < self.len and std.mem.indexOfAny(u8, self.text[sel.cursor..][0..1], " \n") != null) {
-                                sel.cursor = std.mem.indexOfNonePos(u8, self.text, sel.cursor, " \n") orelse self.len;
+                            if (sel.cursor < self.len and std.mem.findAny(u8, self.text[sel.cursor..][0..1], " \n") != null) {
+                                sel.cursor = std.mem.findNonePos(u8, self.text, sel.cursor, " \n") orelse self.len;
                             }
 
                             // find end of word
-                            if (std.mem.indexOfAny(u8, self.text[sel.cursor..self.len], " \n")) |last_space| {
+                            if (std.mem.findAny(u8, self.text[sel.cursor..self.len], " \n")) |last_space| {
                                 sel.cursor = sel.cursor + last_space;
                             } else {
                                 sel.cursor = self.len;
@@ -1248,7 +1130,7 @@ pub fn processEvent(self: *TextEntryWidget, e: *Event) void {
 
                             // delete from oldcur to sel.cursor
                             if (sel.cursor != oldcur) self.textChangedRemoved(oldcur, sel.cursor);
-                            std.mem.copyForwards(u8, self.text[oldcur..], self.text[sel.cursor..self.len]);
+                            @memmove(self.text[oldcur..][0 .. self.len - sel.cursor], self.text[sel.cursor..self.len]);
                             self.setLen(self.len - (sel.cursor - oldcur));
                             sel.cursor = oldcur;
                             sel.end = sel.cursor;
@@ -1262,7 +1144,8 @@ pub fn processEvent(self: *TextEntryWidget, e: *Event) void {
                             const i = @min(ii, self.len - sel.cursor);
 
                             self.textChangedRemoved(sel.cursor, sel.cursor + i);
-                            std.mem.copyForwards(u8, self.text[sel.cursor..], self.text[sel.cursor + i .. self.len]);
+                            const remaining = self.len - (sel.cursor + i);
+                            @memmove(self.text[sel.cursor..][0..remaining], self.text[sel.cursor + i ..][0..remaining]);
                             self.setLen(self.len - i);
                             self.textLayout.scroll_to_cursor = true;
                         }
@@ -1292,7 +1175,7 @@ pub fn processEvent(self: *TextEntryWidget, e: *Event) void {
                     } else {
                         var i: usize = 0;
                         while (i < new.len) {
-                            if (std.mem.indexOfScalar(u8, new[i..], '\n')) |idx| {
+                            if (std.mem.findScalar(u8, new[i..], '\n')) |idx| {
                                 self.textTyped(new[i..][0..idx], set.selected);
                                 i += idx + 1;
                             } else {
@@ -1309,6 +1192,10 @@ pub fn processEvent(self: *TextEntryWidget, e: *Event) void {
             if (me.action == .focus) {
                 e.handle(@src(), self.data());
                 dvui.focusWidget(self.data().id, null, e.num);
+            } else if (me.action == .press and me.button == .middle) {
+                e.handle(@src(), self.data());
+                dvui.focusWidget(self.data().id, null, e.num);
+                self.pastePrimary();
             }
         },
         else => {},
@@ -1317,13 +1204,21 @@ pub fn processEvent(self: *TextEntryWidget, e: *Event) void {
     if (!e.handled) {
         self.textLayout.processEvent(e);
 
-        if (!e.handled and e.evt == .key) {
+        if (!e.handled and e.evt == .key) blk: {
+            if (!self.init_opts.multiline and (e.evt.key.matchBind("char_up") or e.evt.key.matchBind("char_down")))
+                break :blk; // used to move focus
+
             switch (e.evt.key.code) {
+                .escape => {}, // used to exit a popup
                 .page_up, .page_down => {}, // handled by scroll container
                 else => {
                     // Mark all remaining key events as handled. This allows
-                    // checking a keybind (like "d") after the textEntry, but
-                    // where textEntry will get it first.
+                    // having keybinds (like "d") that overlap with normal
+                    // typing.
+                    //
+                    // Strategy - check the keybind after the text entry
+                    // * if text entry has focus, it marks it handled here
+                    // * if no text entry has focus, you'll get it after
                     e.handle(@src(), self.data());
                 },
             }
@@ -1338,18 +1233,25 @@ pub fn processEvent(self: *TextEntryWidget, e: *Event) void {
 }
 
 pub fn paste(self: *TextEntryWidget) void {
-    const clip_text = dvui.clipboardText();
+    self.insertText(dvui.clipboardText());
+}
 
+pub fn pastePrimary(self: *TextEntryWidget) void {
+    self.insertText(dvui.primarySelectionText());
+}
+
+/// Insert `text` at the cursor.
+fn insertText(self: *TextEntryWidget, text: []const u8) void {
     if (self.init_opts.multiline) {
-        self.textTyped(clip_text, false);
+        self.textTyped(text, false);
     } else {
         var i: usize = 0;
-        while (i < clip_text.len) {
-            if (std.mem.indexOfScalar(u8, clip_text[i..], '\n')) |idx| {
-                self.textTyped(clip_text[i..][0..idx], false);
+        while (i < text.len) {
+            if (std.mem.findScalar(u8, text[i..], '\n')) |idx| {
+                self.textTyped(text[i..][0..idx], false);
                 i += idx + 1;
             } else {
-                self.textTyped(clip_text[i..], false);
+                self.textTyped(text[i..], false);
                 break;
             }
         }
@@ -1364,7 +1266,7 @@ pub fn cut(self: *TextEntryWidget) void {
 
         // delete selection
         self.textChangedRemoved(sel.start, sel.end);
-        std.mem.copyForwards(u8, self.text[sel.start..], self.text[sel.end..self.len]);
+        @memmove(self.text[sel.start..][0 .. self.len - sel.end], self.text[sel.end..self.len]);
         self.setLen(self.len - (sel.end - sel.start));
         sel.end = sel.start;
         sel.cursor = sel.start;
@@ -1446,7 +1348,11 @@ test "text internal" {
     }
     try dvui.testing.settle(Local.frame);
 
-    const full_text_buffer = (text ** (@divFloor(Local.limit, text.len) + 1))[0..Local.limit];
+    const full_text_buffer = comptime blk: {
+        var text_buf: []const u8 = text;
+        while (text_buf.len < Local.limit) text_buf = text_buf ++ text;
+        break :blk text_buf;
+    }[0..Local.limit];
     try std.testing.expectEqualStrings(full_text_buffer, Local.text);
 }
 
@@ -1503,7 +1409,11 @@ test "text dynamic buffer" {
     }
     try dvui.testing.settle(Local.frame);
 
-    const full_text_buffer = (text ** (@divFloor(Local.limit, text.len) + 1))[0..Local.limit];
+    const full_text_buffer = comptime blk: {
+        var text_buf: []const u8 = text;
+        while (text_buf.len < Local.limit) text_buf = text_buf ++ text;
+        break :blk text_buf;
+    }[0..Local.limit];
     try std.testing.expectEqualStrings(full_text_buffer, Local.text);
 }
 
@@ -1554,7 +1464,11 @@ test "text buffer" {
     }
     try dvui.testing.settle(Local.frame);
 
-    const full_text_buffer = (text ** (@divFloor(Local.limit, text.len) + 1))[0..Local.limit];
+    const full_text_buffer = comptime blk: {
+        var text_buf: []const u8 = text;
+        while (text_buf.len < Local.limit) text_buf = text_buf ++ text;
+        break :blk text_buf;
+    }[0..Local.limit];
     try std.testing.expectEqualStrings(full_text_buffer, Local.text);
 }
 
@@ -1593,4 +1507,178 @@ test "text array_list" {
     try dvui.testing.writeText(text);
     _ = try dvui.testing.step(Local.frame);
     try std.testing.expectEqualStrings(text, Local.text);
+}
+
+test "text delete to line start and end" {
+    var t = try dvui.testing.init(.{});
+    defer t.deinit();
+
+    // testing.init pins the .windows keybind set, so the line-delete chord is
+    // Ctrl+Shift+Backspace / Ctrl+Shift+Delete regardless of host OS
+    var ctrl_shift: dvui.enums.Mod = .lcontrol;
+    ctrl_shift.combine(.lshift);
+
+    const Local = struct {
+        var text: []const u8 = "";
+        // When set, the frame replaces the buffer with this and clears the flag,
+        // giving each case known starting point with the cursor at the end
+        var reset: ?[]const u8 = null;
+
+        fn frame() !dvui.App.Result {
+            var entry: TextEntryWidget = undefined;
+            entry.init(@src(), .{}, .{ .tag = "entry" });
+            defer entry.deinit();
+
+            if (reset) |s| {
+                entry.textSet(s, false);
+                reset = null;
+            }
+
+            entry.processEvents();
+            entry.draw();
+            text = entry.getText();
+            return .ok;
+        }
+    };
+
+    try dvui.testing.settle(Local.frame);
+    try dvui.testing.pressKey(.tab, .none);
+    try dvui.testing.settle(Local.frame);
+    try dvui.testing.expectFocused("entry");
+
+    // Delete to line start clears everything before the cursor
+    // With the cursor at end of single-line entry, that empties the field
+    Local.reset = "hello world";
+    try dvui.testing.settle(Local.frame);
+    try std.testing.expectEqualStrings("hello world", Local.text);
+    try dvui.testing.pressKey(.backspace, ctrl_shift);
+    try dvui.testing.settle(Local.frame);
+    try std.testing.expectEqualStrings("", Local.text);
+
+    // Delete to line end clears everything from the cursor onward
+    // With the cursor at start (Ctrl+Home), that empties the field
+    Local.reset = "hello world";
+    try dvui.testing.settle(Local.frame);
+    try dvui.testing.pressKey(.home, .lcontrol);
+    try dvui.testing.settle(Local.frame);
+    try dvui.testing.pressKey(.delete, ctrl_shift);
+    try dvui.testing.settle(Local.frame);
+    try std.testing.expectEqualStrings("", Local.text);
+
+    // Mid-line delete to start removes only text left of cursor
+    // The cursor sits just before 'w', so "hello " goes and "world" stays
+    Local.reset = "hello world";
+    try dvui.testing.settle(Local.frame);
+    try dvui.testing.pressKey(.home, .lcontrol);
+    try dvui.testing.settle(Local.frame);
+    for (0..6) |_| try dvui.testing.pressKey(.right, .none);
+    try dvui.testing.settle(Local.frame);
+    try dvui.testing.pressKey(.backspace, ctrl_shift);
+    try dvui.testing.settle(Local.frame);
+    try std.testing.expectEqualStrings("world", Local.text);
+
+    // Mid-line delete to end removes only text right of the cursor
+    // The cursor sits just after "hello", so " world" goes and "hello" stays
+    Local.reset = "hello world";
+    try dvui.testing.settle(Local.frame);
+    try dvui.testing.pressKey(.home, .lcontrol);
+    try dvui.testing.settle(Local.frame);
+    for (0..5) |_| try dvui.testing.pressKey(.right, .none);
+    try dvui.testing.settle(Local.frame);
+    try dvui.testing.pressKey(.delete, ctrl_shift);
+    try dvui.testing.settle(Local.frame);
+    try std.testing.expectEqualStrings("hello", Local.text);
+
+    // Regression for the shift=false correction on the word binds
+    // plain Ctrl+Backspace must still delete the previous word, not whole line
+    Local.reset = "hello world";
+    try dvui.testing.settle(Local.frame);
+    try dvui.testing.pressKey(.backspace, .lcontrol);
+    try dvui.testing.settle(Local.frame);
+    try std.testing.expectEqualStrings("hello ", Local.text);
+}
+
+test "text delete to line start and end multiline" {
+    var t = try dvui.testing.init(.{});
+    defer t.deinit();
+
+    var ctrl_shift: dvui.enums.Mod = .lcontrol;
+    ctrl_shift.combine(.lshift);
+
+    const Local = struct {
+        var text: []const u8 = "";
+        var reset: ?[]const u8 = null;
+
+        fn frame() !dvui.App.Result {
+            var entry: TextEntryWidget = undefined;
+            entry.init(@src(), .{ .multiline = true }, .{ .tag = "entry" });
+            defer entry.deinit();
+
+            if (reset) |s| {
+                entry.textSet(s, false);
+                reset = null;
+            }
+
+            entry.processEvents();
+            entry.draw();
+            text = entry.getText();
+            return .ok;
+        }
+    };
+
+    try dvui.testing.settle(Local.frame);
+    try dvui.testing.pressKey(.tab, .none);
+    try dvui.testing.settle(Local.frame);
+    try dvui.testing.expectFocused("entry");
+
+    // Three lines: "abc" / "def" / "ghi"
+    // Positioning uses line-boundary snaps (Ctrl+Home, Home, End, Up)
+    // so it never depends on how many caret steps a newline costs
+
+    // Delete to line start stops at the newline before the current line:
+    // only the last line's text is removed, the earlier lines and newlines stay
+    Local.reset = "abc\ndef\nghi";
+    try dvui.testing.settle(Local.frame);
+    try dvui.testing.pressKey(.backspace, ctrl_shift);
+    try dvui.testing.settle(Local.frame);
+    try std.testing.expectEqualStrings("abc\ndef\n", Local.text);
+
+    // Delete to line end stops at the newline after the current line:
+    // only the first line's text is removed, its trailing newline and the rest stay
+    Local.reset = "abc\ndef\nghi";
+    try dvui.testing.settle(Local.frame);
+    try dvui.testing.pressKey(.home, .lcontrol);
+    try dvui.testing.settle(Local.frame);
+    try dvui.testing.pressKey(.delete, ctrl_shift);
+    try dvui.testing.settle(Local.frame);
+    try std.testing.expectEqualStrings("\ndef\nghi", Local.text);
+
+    // On the middle line, delete to start with cursor at line end removes
+    // exactly that line's content, leaving both surrounding newlines
+    Local.reset = "abc\ndef\nghi";
+    try dvui.testing.settle(Local.frame);
+    try dvui.testing.pressKey(.up, .none);
+    try dvui.testing.settle(Local.frame);
+    try dvui.testing.pressKey(.end, .none);
+    try dvui.testing.settle(Local.frame);
+    try dvui.testing.pressKey(.backspace, ctrl_shift);
+    try dvui.testing.settle(Local.frame);
+    try std.testing.expectEqualStrings("abc\n\nghi", Local.text);
+
+    // Column 0 of a middle line: delete to start is no-op
+    // It must not eat preceding newline and join with line above
+    Local.reset = "abc\ndef\nghi";
+    try dvui.testing.settle(Local.frame);
+    try dvui.testing.pressKey(.up, .none);
+    try dvui.testing.settle(Local.frame);
+    try dvui.testing.pressKey(.home, .none);
+    try dvui.testing.settle(Local.frame);
+    try dvui.testing.pressKey(.backspace, ctrl_shift);
+    try dvui.testing.settle(Local.frame);
+    try std.testing.expectEqualStrings("abc\ndef\nghi", Local.text);
+    // Same cursor, delete to end removes the line's content
+    // Confirms cursor really was at start of middle line
+    try dvui.testing.pressKey(.delete, ctrl_shift);
+    try dvui.testing.settle(Local.frame);
+    try std.testing.expectEqualStrings("abc\n\nghi", Local.text);
 }

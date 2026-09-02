@@ -53,12 +53,12 @@ pub fn scrollCanvas() void {
     dvui.Path.stroke(.{ .points = &.{
         dataRectScale.pointToPhysical(.{ .x = -10 }),
         dataRectScale.pointToPhysical(.{ .x = 10 }),
-    } }, .{ .thickness = 1, .color = dvui.themeGet().color(.control, .text) });
+    } }, .{ .thickness = 1, .color = .{ .color = dvui.themeGet().color(.control, .text) } });
 
     dvui.Path.stroke(.{ .points = &.{
         dataRectScale.pointToPhysical(.{ .y = -10 }),
         dataRectScale.pointToPhysical(.{ .y = 10 }),
-    } }, .{ .thickness = 1, .color = dvui.themeGet().color(.control, .text) });
+    } }, .{ .thickness = 1, .color = .{ .color = dvui.themeGet().color(.control, .text) } });
 
     // keep record of bounding box
     var mbbox: ?Rect.Physical = null;
@@ -75,7 +75,7 @@ pub fn scrollCanvas() void {
 
         const mouse_point = dvui.currentWindow().mouse_pt.toNatural().diff(.{ .x = 10, .y = 10 });
         var fw: dvui.FloatingWidget = undefined;
-        fw.init(@src(), .{ .mouse_events = false }, .{ .rect = Rect.fromPoint(.cast(mouse_point)), .min_size_content = .all(20), .background = true, .color_fill = dvui.themeGet().focus.opacity(0.5), .data_out = &fwd });
+        fw.init(@src(), .{ .mouse_events = false }, .{ .rect = Rect.fromPoint(.cast(mouse_point)), .min_size_content = .all(20), .background = true, .color_fill = .{ .color = dvui.themeGet().focus.opacity(0.5) }, .data_out = &fwd });
         fw.deinit();
 
         // We want to get mouse motion events during the drag as if we had
@@ -115,8 +115,8 @@ pub fn scrollCanvas() void {
             .background = true,
             .style = .window,
             .border = .{ .h = 1, .w = 1, .x = 1, .y = 1 },
-            .corner_radius = .{ .h = 5, .w = 5, .x = 5, .y = 5 },
-            .color_border = if (dragging_box) dvui.themeGet().focus else null,
+            .corners = .all(5),
+            .color_border = if (dragging_box) .{ .color = dvui.themeGet().focus } else null,
             .box_shadow = .{},
         });
 
@@ -178,7 +178,7 @@ pub fn scrollCanvas() void {
                     _ = dvui.spacer(@src(), .{ .min_size_content = .width(5), .id_extra = k });
                 }
                 const col = if (dragging_this) dvui.Color.lime.opacity(0.5) else dvui.Color.blue;
-                var dbox = dvui.box(@src(), .{}, .{ .id_extra = k, .min_size_content = .{ .w = 20, .h = 20 }, .background = true, .color_fill = col });
+                var dbox = dvui.box(@src(), .{}, .{ .id_extra = k, .min_size_content = .{ .w = 20, .h = 20 }, .background = true, .color_fill = .{ .color = col } });
                 defer dbox.deinit();
 
                 for (evts) |*e| {
@@ -191,7 +191,7 @@ pub fn scrollCanvas() void {
                             if (me.action == .press and me.button.pointer()) {
                                 e.handle(@src(), dbox.data());
                                 dvui.captureMouse(dbox.data(), e.num);
-                                dvui.dragPreStart(me.p, .{ .name = "box_transfer" });
+                                dvui.dragPreStart(me.button, me.p, .{ .name = "box_transfer" });
                             } else if (me.action == .release and me.button.pointer()) {
                                 if (dvui.captured(dbox.data().id)) {
                                     // mouse up before drag started
@@ -230,7 +230,7 @@ pub fn scrollCanvas() void {
                         e.handle(@src(), dragBox.data());
                         dvui.captureMouse(dragBox.data(), e.num);
                         const offset = me.p.diff(dragBox.data().rectScale().r.topLeft()); // pixel offset from dragBox corner
-                        dvui.dragPreStart(me.p, .{ .offset = offset });
+                        dvui.dragPreStart(me.button, me.p, .{ .offset = offset });
                     } else if (me.action == .release and me.button.pointer()) {
                         if (dvui.captured(dragBox.data().id)) {
                             e.handle(@src(), dragBox.data());
@@ -279,7 +279,7 @@ pub fn scrollCanvas() void {
                             dvui.cursorSet(.crosshair);
                             // the drag is hovered above us, draw to indicate that
                             const rs = dragBox.data().contentRectScale();
-                            rs.r.fill(dragBox.data().options.corner_radiusGet().scale(rs.s, Rect.Physical), .{ .color = dvui.themeGet().focus.opacity(0.2) });
+                            rs.r.fill(dragBox.data().options.cornersGet().scale(rs.s, CornerRect.Physical), .{ .color = .{ .color = dvui.themeGet().focus.opacity(0.2) } });
                         }
                     },
                     else => {},
@@ -304,7 +304,7 @@ pub fn scrollCanvas() void {
                 if (me.action == .press and me.button.pointer()) {
                     e.handle(@src(), scrollContainer.data());
                     dvui.captureMouse(scrollContainer.data(), e.num);
-                    dvui.dragPreStart(me.p, .{});
+                    dvui.dragPreStart(me.button, me.p, .{});
                 } else if (me.action == .release and me.button.pointer()) {
                     if (dvui.captured(scrollContainer.data().id)) {
                         e.handle(@src(), scrollContainer.data());
@@ -438,4 +438,5 @@ const dvui = @import("../dvui.zig");
 const entypo = dvui.entypo;
 const Point = dvui.Point;
 const Rect = dvui.Rect;
+const CornerRect = dvui.CornerRect;
 const ScrollInfo = dvui.ScrollInfo;

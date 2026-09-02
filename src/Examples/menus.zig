@@ -180,7 +180,7 @@ pub fn menus() void {
                     }
                 } else {
                     // directly put whatever in the tab
-                    var tab = tabs.addTab(active_tab.* == i, .{});
+                    var tab = tabs.addTab(active_tab.* == i, .{ .process_events = false }, .{});
                     defer tab.deinit();
 
                     // store widget id and subwindow id for later focusing
@@ -200,6 +200,15 @@ pub fn menus() void {
                     }
 
                     dvui.labelNoFmt(@src(), tabname, .{}, label_opts);
+
+                    _ = dvui.spacer(@src(), .{ .min_size_content = .width(4) });
+
+                    if (dvui.buttonIcon(@src(), "close", entypo.cross, .{}, .{}, .{ .margin = .{}, .padding = .{} })) {
+                        dvui.dialog(@src(), .{}, .{ .message = "You clicked close" });
+                    }
+
+                    // processEvents here because we passed .process_events = false above
+                    tab.processEvents();
 
                     if (tab.clicked()) {
                         active_tab.* = i;
@@ -345,7 +354,7 @@ pub fn focus() void {
 
             if (e.evt == .mouse and e.evt.mouse.action == .position) {
                 hbox.data().options.background = true;
-                hbox.data().options.color_fill = dvui.themeGet().color(.content, .fill_hover);
+                hbox.data().options.color_fill = .{ .color = dvui.themeGet().color(.content, .fill_hover) };
             }
         }
         hbox.drawBackground();

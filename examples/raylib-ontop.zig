@@ -47,7 +47,7 @@ pub fn main(init: std.process.Init) !void {
         try win.begin(win.backend.nanoTime());
 
         // send all Raylib events to dvui for processing
-        try backend.addAllEvents(&win);
+        _ = try backend.addAllEvents(&win);
 
         if (backend.shouldBlockRaylibInput()) {
             // NOTE: I am using raygui here because it has a simple lock-unlock system
@@ -81,7 +81,7 @@ pub fn main(init: std.process.Init) !void {
 
         // marks end of dvui frame, don't call dvui functions after this
         // - sends all dvui stuff to backend for rendering, must be called before EndDrawing()
-        _ = try win.end(.{});
+        _ = try win.end(.{ .manage_backend = false });
 
         // cursor management
         if (win.cursorRequestedFloating()) |cursor| {
@@ -115,7 +115,7 @@ fn colorPicker(result: *dvui.Color) void {
         defer hbox.deinit();
 
         dvui.labelNoFmt(@src(), &color_hex, .{}, .{
-            .color_text = result.*,
+            .color_text = .{ .color = result.* },
             .gravity_y = 0.5,
         });
 
