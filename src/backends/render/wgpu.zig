@@ -64,6 +64,9 @@ textures: std.AutoHashMap(usize, wgpu.WGPUTextureView),
 bind_groups: std.AutoHashMap(usize, wgpu.WGPUBindGroup),
 // Render target textures (key = texture ptr → texture view for rendering into)
 target_views: std.AutoHashMap(usize, wgpu.WGPUTextureView),
+// Views wrapped with `textureWrap` (key = view ptr). The renderer owns only the
+// bind group for these; the view and its texture stay with the caller.
+wrapped: std.AutoHashMap(usize, void),
 allocator: std.mem.Allocator,
 
 pub fn init(allocator: std.mem.Allocator, device: wgpu.WGPUDevice, queue: wgpu.WGPUQueue, surface_format: wgpu.WGPUTextureFormat) !@This() {
@@ -436,6 +439,7 @@ pub fn init(allocator: std.mem.Allocator, device: wgpu.WGPUDevice, queue: wgpu.W
         .textures = std.AutoHashMap(usize, wgpu.WGPUTextureView).init(allocator),
         .bind_groups = std.AutoHashMap(usize, wgpu.WGPUBindGroup).init(allocator),
         .target_views = std.AutoHashMap(usize, wgpu.WGPUTextureView).init(allocator),
+        .wrapped = std.AutoHashMap(usize, void).init(allocator),
         .allocator = allocator,
     };
 }
@@ -464,6 +468,9 @@ pub fn deinit(self: *@This()) void {
     var tit = self.target_views.valueIterator();
     while (tit.next()) |tv| wgpu.wgpuTextureViewRelease(tv.*);
     self.target_views.deinit();
+
+    // Wrapped views are not ours; their bind groups were released above.
+    self.wrapped.deinit();
 }
 
 pub fn setRenderPass(self: *@This(), pass: wgpu.WGPURenderPassEncoder) void {
@@ -708,6 +715,8 @@ pub fn textureCreate(self: *@This(), pixels: [*]const u8, options: dvui.Texture.
 pub fn textureUpdate(self: *@This(), texture: dvui.Texture, pixels: [*]const u8) !void {
     const key = @intFromPtr(texture.ptr);
     const tex: wgpu.WGPUTexture = @ptrCast(texture.ptr);
+    // Wrapped views (`textureWrap`) are not in `textures`, so they are refused here:
+    // the caller renders into them, dvui never uploads pixels.
     _ = self.textures.get(key) orelse return error.TextureUpdate;
 
     wgpu.wgpuQueueWriteTexture(self.queue, &.{
@@ -724,10 +733,80 @@ pub fn textureUpdate(self: *@This(), texture: dvui.Texture, pixels: [*]const u8)
 
 pub fn textureDestroy(self: *@This(), texture: dvui.Texture) void {
     const key = @intFromPtr(texture.ptr);
+    if (self.wrapped.contains(key)) {
+        // Not ours to destroy: drop only the renderer-side bind group.
+        self.textureUnwrap(texture);
+        return;
+    }
     if (self.bind_groups.fetchRemove(key)) |kv| wgpu.wgpuBindGroupRelease(kv.value);
     if (self.textures.fetchRemove(key)) |kv| wgpu.wgpuTextureViewRelease(kv.value);
     const tex: wgpu.WGPUTexture = @ptrCast(texture.ptr);
     wgpu.wgpuTextureRelease(tex);
+}
+
+/// Wrap an existing `WGPUTextureView` as a `dvui.Texture` that `dvui.image`
+/// (`ImageSource.texture`) and `dvui.renderTexture` can draw, WITHOUT taking
+/// ownership of the view or its texture.
+///
+/// Semantics:
+/// - The caller keeps ownership: the view must stay alive (and unchanged in
+///   size) for as long as the returned texture is drawn. `textureDestroy` on a
+///   wrapped texture only releases the renderer's own bind group; it never
+///   releases the view. Call `textureUnwrap` (or `textureDestroy`) BEFORE
+///   releasing the view, e.g. when an offscreen target is re-created on resize.
+/// - The view must be a 2D, non-multisampled, filterable colour view (sample
+///   type `Float`), because it is bound through the same texture bind group
+///   layout dvui uses for its own RGBA8Unorm textures. `RGBA8Unorm` /
+///   `BGRA8Unorm` targets whose contents are already display-referred (sRGB
+///   encoded) draw exactly like dvui's own textures: the fragment shader copies
+///   samples through unchanged, so the wrapped frame gets the same single
+///   colour transform as the rest of the UI.
+/// - `textureUpdate` is refused for wrapped textures (the caller renders into
+///   the view; dvui never uploads pixels to it).
+/// - `texture.ptr` is the view pointer; wrapping the same view twice returns
+///   `error.TextureCreate` until it is unwrapped.
+///
+/// `interpolation` is recorded on the returned texture; sampling uses the
+/// renderer's single linear clamp sampler (like every other texture here).
+pub fn textureWrap(self: *@This(), view: wgpu.WGPUTextureView, width: u32, height: u32, interpolation: dvui.enums.TextureInterpolation) !dvui.Texture {
+    const view_ptr = view orelse return error.TextureCreate;
+    const key = @intFromPtr(view_ptr);
+    if (self.bind_groups.contains(key)) return error.TextureCreate;
+
+    const bg = wgpu.wgpuDeviceCreateBindGroup(self.device, &wgpu.WGPUBindGroupDescriptor{
+        .nextInChain = null,
+        .label = .{ .data = "dvui_wrap_bg", .length = 12 },
+        .layout = self.texture_bgl,
+        .entryCount = 2,
+        .entries = &[_]wgpu.WGPUBindGroupEntry{
+            .{ .nextInChain = null, .binding = 0, .buffer = null, .offset = 0, .size = 0, .sampler = null, .textureView = view },
+            .{ .nextInChain = null, .binding = 1, .buffer = null, .offset = 0, .size = 0, .sampler = self.sampler, .textureView = null },
+        },
+    }) orelse return error.TextureCreate;
+    errdefer wgpu.wgpuBindGroupRelease(bg);
+
+    try self.wrapped.put(key, {});
+    errdefer _ = self.wrapped.remove(key);
+    try self.bind_groups.put(key, bg);
+
+    return .{
+        .ptr = @ptrCast(view_ptr),
+        .width = width,
+        .height = height,
+        .format = .rgba_32,
+        .interpolation = interpolation,
+        .wrap_u = .clamp,
+        .wrap_v = .clamp,
+    };
+}
+
+/// Forget a texture made by `textureWrap`: releases the renderer's bind group
+/// and nothing else. Safe to call on a texture that was already unwrapped or
+/// destroyed (no-op). The caller releases the underlying view afterwards.
+pub fn textureUnwrap(self: *@This(), texture: dvui.Texture) void {
+    const key = @intFromPtr(texture.ptr);
+    if (!self.wrapped.remove(key)) return;
+    if (self.bind_groups.fetchRemove(key)) |kv| wgpu.wgpuBindGroupRelease(kv.value);
 }
 
 pub fn textureCreateTarget(self: *@This(), options: dvui.Texture.CreateOptions) !dvui.TextureTarget {
