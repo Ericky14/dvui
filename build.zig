@@ -1379,11 +1379,11 @@ pub fn addDvuiModule(
     });
     if (libc) dvui_translate_c.defineCMacro("DVUI_USE_LIBC", "1");
     // Optimized builds turn mingw's <wchar.h>/<string.h> into fortified inline
-    // wrappers (__MINGW_FORTIFY_LEVEL) that master's translate-c emits with an
+    // wrappers (__MINGW_FORTIFY_LEVEL, derived from _FORTIFY_SOURCE, which Zig sets to 2 in ReleaseSafe) that master's translate-c emits with an
     // unused local constant; Zig rejects the module and every ReleaseSafe/ReleaseFast
     // consumer failed to compile. dvui never calls those wrappers.
     if (target.result.os.tag == .windows and target.result.abi == .gnu)
-        dvui_translate_c.defineCMacro("__MINGW_FORTIFY_LEVEL", "0");
+        dvui_translate_c.defineCMacro("_FORTIFY_SOURCE", "0");
     // NOTE: iOS cross-compiles have no native sysroot, so dvui_mod (which directly compiles
     // C sources, e.g. vendor/stb/*.c below) needs libc headers like stdio.h passed explicitly.
     const dvui_mod_needs_ios_sysroot = target.result.os.tag == .ios;
