@@ -111,7 +111,9 @@ pub fn init(self: *BlurBackdrop, rect: Rect, witness: anytype) void {
 /// texture; see `releaseTexture` for that.
 pub fn deinit(self: *BlurBackdrop) void {
     if (!self.dirty) return;
-    defer self.dirty = false;
+    // Cleared below unless the bracket turned out to have nothing in it.
+    var stay_dirty = false;
+    defer self.dirty = stay_dirty;
 
     const cw = dvui.currentWindow();
     _ = dvui.renderingSet(self.prev_rendering);
@@ -129,6 +131,17 @@ pub fn deinit(self: *BlurBackdrop) void {
     // replay - the bracketed content (e.g. a checkerboard background)
     // vanishing behind the enclosing window every dirty frame.
     const cmds = sw.render_cmds.items[self.cmd_start..];
+    // Nothing was drawn inside the bracket. That is the normal state of the
+    // *first* frame for any content laid out by dvui rather than positioned
+    // with an explicit `.rect`: min sizes are still unknown, so the widgets
+    // resolve to empty rects and queue no draw commands at all. Caching that
+    // would freeze an all-transparent backdrop forever, because `rect` and
+    // `witness` never change again and nothing else re-dirties the cache.
+    // An empty capture is not a capture: stay dirty and retry next frame.
+    if (cmds.len == 0) {
+        stay_dirty = true;
+        return;
+    }
 
     var r = self.rect;
     if (r.empty()) return;
@@ -309,4 +322,103 @@ fn passStrength(a: u32, b: u32) f32 {
     const bf: f32 = @floatFromInt(b);
     const ratio = @min(af, bf) / @max(af, bf);
     return @min(1.0, 2 * (1 - ratio));
+}
+
+test "the cached backdrop is not empty on a backend without an SDF pipeline" {
+    // End-to-end guard for the capture in `deinit`: bracket an opaque
+    // background, then read the cached texture back and assert it holds
+    // pixels. A backend with no `drawSdfRect` (the testing backend, and every
+    // renderer other than wgpu) takes `Backend.drawSdfRectFallback` for every
+    // rounded-rect fill, which is what a themed panel/card/box background is -
+    // so if that path loses the render-target offset, the whole capture comes
+    // back fully transparent and "glass" silently renders as nothing.
+    const Local = struct {
+        var center_alpha: u8 = 0;
+
+        fn frame() !dvui.App.Result {
+            var page = dvui.box(@src(), .{}, .{ .expand = .both });
+            defer page.deinit();
+
+            const panel: Rect = .{ .x = 10, .y = 10, .w = 40, .h = 40 };
+            const backdrop = BlurBackdrop.get(@src());
+            backdrop.radius_px = 8;
+            backdrop.init(panel, .{backdrop.radius_px});
+            defer backdrop.deinit();
+
+            // Rounded + solid colour: the SDF path, i.e. what a real panel draws.
+            var under = dvui.box(@src(), .{}, .{
+                .rect = .{ .x = 0, .y = 0, .w = 60, .h = 60 },
+                .background = true,
+                .color_fill = .{ .color = .white },
+                .corners = .all(4),
+            });
+            under.deinit();
+
+            if (backdrop.small) |tex| {
+                const pixels = try dvui.textureReadTarget(std.testing.allocator, .cast(tex));
+                defer std.testing.allocator.free(pixels);
+                center_alpha = pixels[pixels.len / 2].a;
+            }
+            return .ok;
+        }
+    };
+
+    var t = try dvui.testing.init(.{ .window_size = .{ .w = 60, .h = 60 } });
+    defer t.deinit();
+    try dvui.testing.settle(Local.frame);
+    _ = try dvui.testing.step(Local.frame);
+
+    try std.testing.expect(Local.center_alpha > 200);
+}
+
+test "the cached backdrop is not empty for laid-out (non-explicit-rect) content" {
+    const Local = struct {
+        var max_alpha: u8 = 0;
+
+        fn frame() !dvui.App.Result {
+            var page = dvui.box(@src(), .{}, .{
+                .expand = .both,
+                .background = true,
+                .color_fill = .{ .color = .black },
+            });
+            defer page.deinit();
+
+            const panel: Rect = .{ .x = 20, .y = 50, .w = 280, .h = 100 };
+            const backdrop = BlurBackdrop.get(@src());
+            backdrop.radius_px = 16;
+            backdrop.init(panel, .{backdrop.radius_px});
+            defer backdrop.deinit();
+
+            {
+                var strip = dvui.box(@src(), .{ .dir = .horizontal, .gap = 8 }, .{ .padding = .all(16) });
+                defer strip.deinit();
+                inline for (.{ "#FF4D4D", "#4DFF88", "#4D8CFF", "#FFD24D", "#B44DFF" }, 0..) |hex, index| {
+                    var cell = dvui.box(@src(), .{}, .{
+                        .id_extra = index,
+                        .background = true,
+                        .color_fill = .{ .color = .fromHex(hex) },
+                        .min_size_content = .{ .w = 48, .h = 160 },
+                        .corners = .all(4),
+                    });
+                    cell.deinit();
+                }
+            }
+
+            if (backdrop.small) |tex| {
+                const pixels = try dvui.textureReadTarget(std.testing.allocator, .cast(tex));
+                defer std.testing.allocator.free(pixels);
+                var seen: u8 = 0;
+                for (pixels) |pixel| seen = @max(seen, pixel.a);
+                max_alpha = seen;
+            }
+            return .ok;
+        }
+    };
+
+    var t = try dvui.testing.init(.{ .window_size = .{ .w = 320, .h = 200 } });
+    defer t.deinit();
+    try dvui.testing.settle(Local.frame);
+    _ = try dvui.testing.step(Local.frame);
+
+    try std.testing.expect(Local.max_alpha > 200);
 }
