@@ -3,6 +3,18 @@
 //! Renders dvui's 2D triangles using wgpu-native.
 //! Implements the dvui render backend interface: drawClippedTriangles,
 //! textureCreate/Update/Destroy, begin, end.
+//!
+//! ## The host has to poll the device
+//!
+//! wgpu defers the actual freeing of a released resource until the device is
+//! polled. A windowed host gets that for free from `wgpuSurfacePresent`, but a
+//! **headless** one — a test harness, an offscreen renderer — presents nothing,
+//! so nothing released is ever freed and the device runs out of memory while
+//! every `Release` call in here has already been made. Call
+//! `wgpuDevicePoll(device, false, null)` once a frame.
+//!
+//! `renderTargetViewCount` / `textureViewCount` are there for a host to assert
+//! on: over a steady UI they must come back to the same number every frame.
 
 const std = @import("std");
 const dvui = @import("dvui");
@@ -785,10 +797,41 @@ pub fn textureDestroy(self: *@This(), texture: dvui.Texture) void {
         self.textureUnwrap(texture);
         return;
     }
-    if (self.bind_groups.fetchRemove(key)) |kv| wgpu.wgpuBindGroupRelease(kv.value);
-    if (self.textures.fetchRemove(key)) |kv| wgpu.wgpuTextureViewRelease(kv.value);
+    self.releaseRegistries(key);
     const tex: wgpu.WGPUTexture = @ptrCast(texture.ptr);
     wgpu.wgpuTextureRelease(tex);
+}
+
+/// Drop every renderer-side handle registered against one texture pointer.
+///
+/// Both destroy paths go through here because on this backend they are the same
+/// texture. `textureFromTarget` is a *cast* — a render target that becomes a
+/// sampled texture keeps its pointer — so a texture destroyed through
+/// `textureDestroy` may still own the render view `textureCreateTarget` made
+/// for it. Releasing only two of the three registries leaked that view, and a
+/// live view holds its `WGPUTexture` open, so the `wgpuTextureRelease` below
+/// freed nothing either: every `BlurBackdrop` capture orphaned a target
+/// (measured at +5.3 entries per frame) until the device ran out of memory and
+/// wgpu-native's default handler aborted the process.
+fn releaseRegistries(self: *@This(), key: usize) void {
+    if (self.bind_groups.fetchRemove(key)) |kv| wgpu.wgpuBindGroupRelease(kv.value);
+    if (self.textures.fetchRemove(key)) |kv| wgpu.wgpuTextureViewRelease(kv.value);
+    if (self.target_views.fetchRemove(key)) |kv| wgpu.wgpuTextureViewRelease(kv.value);
+}
+
+/// How many render-target views the renderer is holding open.
+///
+/// For a host's leak test: this is the number that used to climb by ~5 every
+/// frame a backdrop was captured. Over a steady UI it must return to the same
+/// value frame after frame.
+pub fn renderTargetViewCount(self: *const @This()) usize {
+    return self.target_views.count();
+}
+
+/// How many sampled-texture views the renderer is holding open. See
+/// `renderTargetViewCount`.
+pub fn textureViewCount(self: *const @This()) usize {
+    return self.textures.count();
 }
 
 /// Wrap an existing `WGPUTextureView` as a `dvui.Texture` that `dvui.image`
@@ -923,9 +966,7 @@ pub fn textureFromTargetTemp(_: *@This(), target: dvui.TextureTarget) dvui.Textu
 
 pub fn textureDestroyTarget(self: *@This(), texture: dvui.Texture.Target) void {
     const key = @intFromPtr(texture.ptr);
-    if (self.bind_groups.fetchRemove(key)) |kv| wgpu.wgpuBindGroupRelease(kv.value);
-    if (self.textures.fetchRemove(key)) |kv| wgpu.wgpuTextureViewRelease(kv.value);
-    if (self.target_views.fetchRemove(key)) |kv| wgpu.wgpuTextureViewRelease(kv.value);
+    self.releaseRegistries(key);
     const tex: wgpu.WGPUTexture = @ptrCast(texture.ptr);
     wgpu.wgpuTextureRelease(tex);
 }

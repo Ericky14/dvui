@@ -37,6 +37,22 @@ const Texture = dvui.Texture;
 
 const BlurBackdrop = @This();
 
+/// How many early captures are read back and checked for coverage.
+///
+/// The cache is invalidated only by `rect` + `witness`, so a capture that comes
+/// back empty is kept forever — and "empty" is not only "nothing was queued".
+/// A frame can queue commands that render to nothing: content still laid out at
+/// zero size, a fill that is still fully transparent, a texture that has not
+/// finished uploading. `rect` and `witness` do not change afterwards, so the
+/// black stays.
+///
+/// A readback costs a GPU stall, so it is not something to do on every dirty
+/// frame of a live view. Doing it for the first few is enough: the failure is a
+/// startup race, and the moment one capture has coverage the probing stops for
+/// good. If the budget runs out the probing also stops — content that is
+/// genuinely transparent is allowed to be.
+const probe_captures: u8 = 8;
+
 /// Physical-pixel rect this backdrop covers. Set by `init`.
 rect: Rect.Physical = .{},
 /// CSS `backdrop-filter: blur(radius_px)`-equivalent blur strength.
@@ -45,6 +61,9 @@ radius_px: f32 = 16,
 small: ?Texture = null,
 /// True until the next `deinit` runs a real capture.
 dirty: bool = true,
+/// Captures left to check for coverage before trusting them blind. See
+/// `probe_captures` and the check at the end of `deinit`.
+probes_left: u8 = probe_captures,
 /// Hash of the last `init`'s `rect` + `witness`, for auto-dirty.
 last_hash: u64 = 0,
 
@@ -285,6 +304,24 @@ pub fn deinit(self: *BlurBackdrop) void {
         cur = dvui.textureFromTarget(step_target) catch break; // destroys step_target
     }
 
+    // The capture is only believed once it is known to have something in it —
+    // for the first few captures, and then never again. See `probe_captures`.
+    if (self.probes_left > 0) {
+        self.probes_left -= 1;
+        if (coverageOf(cur)) |covered| {
+            if (!covered) {
+                // Keep whatever was cached before (usually nothing, so callers
+                // fall back to an opaque surface rather than showing a black
+                // pane) and try again next frame.
+                dvui.textureDestroyLater(cur);
+                stay_dirty = true;
+                return;
+            }
+            // It works. Stop paying for the readback.
+            self.probes_left = 0;
+        }
+    }
+
     if (self.small) |old| dvui.textureDestroyLater(old);
     self.small = cur;
 }
@@ -306,6 +343,19 @@ fn releaseTexture(ptr: *anyopaque) void {
     const self: *BlurBackdrop = @ptrCast(@alignCast(ptr));
     if (self.small) |tex| dvui.textureDestroyLater(tex);
     self.* = undefined;
+}
+
+/// True when `texture` has any non-transparent pixel, null when it could not be
+/// read (a backend without readback: assume the capture is fine rather than
+/// retrying forever).
+fn coverageOf(texture: Texture) ?bool {
+    const gpa = dvui.currentWindow().lifo();
+    const pixels = dvui.textureReadTarget(gpa, .cast(texture)) catch return null;
+    defer gpa.free(pixels);
+    for (pixels) |pixel| {
+        if (pixel.a != 0) return true;
+    }
+    return false;
 }
 
 /// How much of a full kawase pass's blur spread a size change from `a` to
@@ -448,4 +498,56 @@ test "a rounded fill lands on an offset render target" {
     target.destroyLater();
 
     try std.testing.expect(pixels[(size / 2) * size + (size / 2)].a > 200);
+}
+
+test "a capture that renders to nothing is not cached forever" {
+    // The cache is invalidated only by rect + witness, so a capture taken while
+    // the content still renders to nothing would be kept for good. It is not
+    // enough to check that commands were queued: this content queues a fill
+    // every frame and simply has no colour in it for the first two.
+    const Local = struct {
+        var frames: usize = 0;
+        var max_alpha: u8 = 0;
+
+        fn frame() !dvui.App.Result {
+            var page = dvui.box(@src(), .{}, .{ .expand = .both });
+            defer page.deinit();
+
+            const panel: Rect = .{ .x = 10, .y = 10, .w = 40, .h = 40 };
+            const backdrop = BlurBackdrop.get(@src());
+            backdrop.radius_px = 8;
+            // A constant witness, which is the whole point: nothing about the
+            // *inputs* changes when the content starts drawing for real.
+            backdrop.init(panel, .{@as(u64, 7)});
+            defer backdrop.deinit();
+
+            const alpha: u8 = if (frames < 2) 0 else 255;
+            frames += 1;
+            var under = dvui.box(@src(), .{}, .{
+                .rect = .{ .x = 0, .y = 0, .w = 60, .h = 60 },
+                .background = true,
+                .color_fill = .{ .color = .{ .r = 255, .g = 255, .b = 255, .a = alpha } },
+                .corners = .all(4),
+            });
+            under.deinit();
+
+            if (backdrop.small) |tex| {
+                const pixels = try dvui.textureReadTarget(std.testing.allocator, .cast(tex));
+                defer std.testing.allocator.free(pixels);
+                var seen: u8 = 0;
+                for (pixels) |pixel| seen = @max(seen, pixel.a);
+                max_alpha = seen;
+            }
+            return .ok;
+        }
+    };
+
+    var t = try dvui.testing.init(.{ .window_size = .{ .w = 60, .h = 60 } });
+    defer t.deinit();
+    Local.frames = 0;
+    Local.max_alpha = 0;
+    // Six frames: two with nothing to capture, then four with something.
+    for (0..6) |_| _ = try dvui.testing.step(Local.frame);
+
+    try std.testing.expect(Local.max_alpha > 200);
 }
