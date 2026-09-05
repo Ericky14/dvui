@@ -422,3 +422,30 @@ test "the cached backdrop is not empty for laid-out (non-explicit-rect) content"
 
     try std.testing.expect(Local.max_alpha > 200);
 }
+
+test "a rounded fill lands on an offset render target" {
+    // Every themed panel, card and chip fills a rounded rect in a solid colour,
+    // which `Rect.fill` routes through `renderSdfRect`. On a backend with no SDF
+    // pipeline — the testing backend, and every renderer other than wgpu —
+    // that lands in `Backend.drawSdfRectFallback`, which used to subtract the
+    // render-target offset a second time and push the shape clean off the
+    // target. Nothing errored; the capture just came back empty, so a
+    // `BlurBackdrop` over a panel (or a `Picture` over a sub-rect) blurred
+    // nothing at all.
+    var t = try dvui.testing.init(.{ .window_size = .{ .w = 40, .h = 40 } });
+    defer t.deinit();
+
+    const size = 20;
+    const target = try dvui.textureCreateTarget(.{ .width = size, .height = size });
+    const offset: dvui.Point.Physical = .{ .x = 30, .y = 30 };
+    const previous = dvui.renderTarget(.{ .texture = target, .offset = offset });
+    const filled: dvui.Rect.Physical = .{ .x = offset.x, .y = offset.y, .w = size, .h = size };
+    filled.fill(.round(4), .{ .color = .{ .color = .white } });
+    _ = dvui.renderTarget(previous);
+
+    const pixels = try dvui.textureReadTarget(std.testing.allocator, target);
+    defer std.testing.allocator.free(pixels);
+    target.destroyLater();
+
+    try std.testing.expect(pixels[(size / 2) * size + (size / 2)].a > 200);
+}

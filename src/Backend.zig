@@ -114,7 +114,16 @@ fn drawSdfRectFallback(self: Backend, sdf_rect: dvui.SdfRect, clipr: ?dvui.Rect.
     // Fallback: use tessellated path rendering for backends without SDF
     _ = self;
     _ = clipr;
-    const rect: dvui.Rect.Physical = .{ .x = sdf_rect.pos.x, .y = sdf_rect.pos.y, .w = sdf_rect.size.w, .h = sdf_rect.size.h };
+    // `renderSdfRect` already moved `pos` into render-target space, but the
+    // path fills below go out through `dvui.Path` -> `renderTriangles`, which
+    // subtracts `render_target.offset` again. Put it back so the offset is
+    // applied exactly once. With the usual zero offset this is a no-op; with a
+    // non-zero one — every `BlurBackdrop` capture, and any `Picture` over a
+    // sub-rect — the shape was being pushed off the target entirely and the
+    // capture came back empty, silently, on every backend without an SDF
+    // pipeline (i.e. everything but the wgpu renderer).
+    const offset = dvui.currentWindow().render_target.offset;
+    const rect: dvui.Rect.Physical = .{ .x = sdf_rect.pos.x + offset.x, .y = sdf_rect.pos.y + offset.y, .w = sdf_rect.size.w, .h = sdf_rect.size.h };
     const corners: dvui.CornerRect.Physical = .{
         .tl = .round(sdf_rect.radii.x),
         .tr = .round(sdf_rect.radii.y),
