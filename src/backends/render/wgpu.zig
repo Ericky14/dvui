@@ -23,6 +23,17 @@ const SdfInstanceData = extern struct {
     border_softness: [2]f32, // border_width, softness (unused for now)
 };
 
+/// WebGPU's `minUniformBufferOffsetAlignment` guaranteed limit. A dynamic
+/// uniform offset must be a multiple of it, so each projection gets a 256-byte
+/// slot even though it only fills 64 of them.
+const uniform_slot_stride: u64 = 256;
+/// One 4x4 f32 orthographic projection.
+const uniform_slot_size: u64 = 64;
+/// Slot 0 is the window's projection and is never recycled; the rest are a
+/// per-frame ring for render-target switches. A `BlurBackdrop` capture costs
+/// roughly 2*log2(radius) switches, so this is many panels' worth.
+const uniform_slot_count: u32 = 256;
+
 // GPU state
 device: wgpu.WGPUDevice,
 queue: wgpu.WGPUQueue,
@@ -58,6 +69,21 @@ command_encoder: ?wgpu.WGPUCommandEncoder = null,
 main_surface_view: ?wgpu.WGPUTextureView = null,
 viewport_width: f32 = 0,
 viewport_height: f32 = 0,
+// Size of whatever the *current* pass draws into: the window while the main
+// pass is bound, the texture while a render target is. Scissor rects are
+// validated against the attachment, not against the window, so a pass that
+// renders into a 961x844 target with the window's 1400x860 scissor is rejected
+// -- and wgpu rejects the whole submitted command buffer for it, so one stray
+// scissor loses the entire frame.
+pass_width: f32 = 0,
+pass_height: f32 = 0,
+// One projection matrix per render-target switch, in a single uniform buffer
+// read through dynamic offsets. See `writeProjection`.
+// The render target the current pass writes into, or null for the window.
+current_target_view: ?wgpu.WGPUTextureView = null,
+uniform_slot: u32 = 0,
+uniform_slots_used: u32 = 1,
+uniform_overflow_logged: bool = false,
 
 // Texture registry
 textures: std.AutoHashMap(usize, wgpu.WGPUTextureView),
@@ -94,8 +120,12 @@ pub fn init(allocator: std.mem.Allocator, device: wgpu.WGPUDevice, queue: wgpu.W
             .buffer = .{
                 .nextInChain = null,
                 .type = wgpu.WGPUBufferBindingType_Uniform,
-                .hasDynamicOffset = @intFromBool(false),
-                .minBindingSize = 64,
+                // Dynamic: every pass in one command encoder reads the uniform
+                // buffer as it is at *submit* time, so writing the projection
+                // between passes gives every pass the last value written. An
+                // offset per pass is the only way each can read its own.
+                .hasDynamicOffset = @intFromBool(true),
+                .minBindingSize = uniform_slot_size,
             },
             .sampler = std.mem.zeroes(wgpu.WGPUSamplerBindingLayout),
             .texture = std.mem.zeroes(wgpu.WGPUTextureBindingLayout),
@@ -215,12 +245,13 @@ pub fn init(allocator: std.mem.Allocator, device: wgpu.WGPUDevice, queue: wgpu.W
         },
     }) orelse return error.BackendError;
 
-    // Uniform buffer (4x4 float matrix = 64 bytes)
+    // Uniform buffer: `uniform_slot_count` projections, one per render-target
+    // switch, addressed by dynamic offset.
     const uniform_buffer = wgpu.wgpuDeviceCreateBuffer(device, &wgpu.WGPUBufferDescriptor{
         .nextInChain = null,
         .label = .{ .data = "dvui_uniform", .length = 12 },
         .usage = wgpu.WGPUBufferUsage_Uniform | wgpu.WGPUBufferUsage_CopyDst,
-        .size = 64,
+        .size = uniform_slot_stride * uniform_slot_count,
         .mappedAtCreation = @intFromBool(false),
     }) orelse return error.BackendError;
 
@@ -235,7 +266,8 @@ pub fn init(allocator: std.mem.Allocator, device: wgpu.WGPUDevice, queue: wgpu.W
             .binding = 0,
             .buffer = uniform_buffer,
             .offset = 0,
-            .size = 64,
+            // One slot; the dynamic offset picks which.
+            .size = uniform_slot_size,
             .sampler = null,
             .textureView = null,
         }},
@@ -485,23 +517,50 @@ pub fn setCommandEncoder(self: *@This(), encoder: wgpu.WGPUCommandEncoder, surfa
 pub fn setViewportSize(self: *@This(), size: struct { width: f32, height: f32 }) void {
     self.viewport_width = size.width;
     self.viewport_height = size.height;
+    if (self.current_target_view == null) {
+        self.pass_width = size.width;
+        self.pass_height = size.height;
+    }
 
-    // Update orthographic projection matrix
-    const w = size.width;
-    const h = size.height;
+    // Slot 0 holds the window's projection for the life of the window, so the
+    // main pass never has to compete for a slot with the frame's target
+    // switches.
+    self.writeProjectionAt(0, size.width, size.height);
+    self.uniform_slot = 0;
+}
+
+/// The orthographic projection for a `w` x `h` attachment, written into `slot`.
+fn writeProjectionAt(self: *@This(), slot: u32, w: f32, h: f32) void {
+    if (!(w > 0) or !(h > 0)) return;
     const projection = [16]f32{
         2.0 / w, 0,        0, 0,
         0,       -2.0 / h, 0, 0,
         0,       0,        1, 0,
         -1,      1,        0, 1,
     };
-    wgpu.wgpuQueueWriteBuffer(self.queue, self.uniform_buffer, 0, &projection, @sizeOf(@TypeOf(projection)));
+    const offset: u64 = @as(u64, slot) * uniform_slot_stride;
+    wgpu.wgpuQueueWriteBuffer(self.queue, self.uniform_buffer, offset, &projection, @sizeOf(@TypeOf(projection)));
+}
+
+/// Take the next free slot in this frame's ring and write `w` x `h`'s
+/// projection into it, so the pass about to be opened reads its own matrix.
+fn writeProjection(self: *@This(), w: f32, h: f32) void {
+    const slot = dvui.render.nextRingSlot(&self.uniform_slots_used, uniform_slot_count);
+    if (slot == null and !self.uniform_overflow_logged) {
+        self.uniform_overflow_logged = true;
+        dvui.log.warn("wgpu: more than {d} render-target switches in one frame; later ones share a projection slot", .{uniform_slot_count - 1});
+    }
+    self.uniform_slot = slot orelse (uniform_slot_count - 1);
+    self.writeProjectionAt(self.uniform_slot, w, h);
 }
 
 pub fn begin(self: *@This(), _: std.mem.Allocator) !void {
     self.vtx_byte_offset = 0;
     self.idx_byte_offset = 0;
     self.sdf_instance_byte_offset = 0;
+    // Slot 0 stays the window's; the ring starts after it.
+    self.uniform_slots_used = 1;
+    self.uniform_overflow_logged = false;
 }
 
 pub fn end(_: *@This()) !void {}
@@ -552,7 +611,8 @@ pub fn drawClippedTriangles(self: *@This(), _: dvui.Size.Physical, texture: ?dvu
 
     // Set pipeline and bind groups
     wgpu.wgpuRenderPassEncoderSetPipeline(pass, self.pipeline);
-    wgpu.wgpuRenderPassEncoderSetBindGroup(pass, 0, self.uniform_bind_group, 0, null);
+    const uniform_offsets = [_]u32{@intCast(@as(u64, self.uniform_slot) * uniform_slot_stride)};
+    wgpu.wgpuRenderPassEncoderSetBindGroup(pass, 0, self.uniform_bind_group, 1, &uniform_offsets);
 
     // Texture bind group
     const tex_bg = if (texture) |t| blk: {
@@ -561,16 +621,9 @@ pub fn drawClippedTriangles(self: *@This(), _: dvui.Size.Physical, texture: ?dvu
     } else self.white_bind_group;
     wgpu.wgpuRenderPassEncoderSetBindGroup(pass, 1, tex_bg, 0, null);
 
-    // Scissor rect
-    if (clipr) |clip| {
-        const x: u32 = @intFromFloat(@max(0, clip.x));
-        const y: u32 = @intFromFloat(@max(0, clip.y));
-        const w: u32 = @intFromFloat(@max(0, clip.w));
-        const h: u32 = @intFromFloat(@max(0, clip.h));
-        wgpu.wgpuRenderPassEncoderSetScissorRect(pass, x, y, w, h);
-    } else {
-        wgpu.wgpuRenderPassEncoderSetScissorRect(pass, 0, 0, @intFromFloat(self.viewport_width), @intFromFloat(self.viewport_height));
-    }
+    // Scissor rect, clamped to whatever this pass draws into.
+    const scissor = dvui.render.clampScissor(clipr, self.pass_width, self.pass_height);
+    wgpu.wgpuRenderPassEncoderSetScissorRect(pass, scissor.x, scissor.y, scissor.w, scissor.h);
 
     // Bind this batch's slice of the buffer and draw
     const index_format = if (@sizeOf(Vertex.Index) == 2) wgpu.WGPUIndexFormat_Uint16 else wgpu.WGPUIndexFormat_Uint32;
@@ -632,18 +685,12 @@ pub fn drawSdfRect(self: *@This(), sdf_rect: dvui.SdfRect, clipr: ?dvui.Rect.Phy
 
     // Set SDF pipeline
     wgpu.wgpuRenderPassEncoderSetPipeline(pass, self.sdf_pipeline);
-    wgpu.wgpuRenderPassEncoderSetBindGroup(pass, 0, self.uniform_bind_group, 0, null);
+    const uniform_offsets = [_]u32{@intCast(@as(u64, self.uniform_slot) * uniform_slot_stride)};
+    wgpu.wgpuRenderPassEncoderSetBindGroup(pass, 0, self.uniform_bind_group, 1, &uniform_offsets);
 
-    // Scissor rect
-    if (clipr) |clip| {
-        const x: u32 = @intFromFloat(@max(0, clip.x));
-        const y: u32 = @intFromFloat(@max(0, clip.y));
-        const w: u32 = @intFromFloat(@max(0, clip.w));
-        const h: u32 = @intFromFloat(@max(0, clip.h));
-        wgpu.wgpuRenderPassEncoderSetScissorRect(pass, x, y, w, h);
-    } else {
-        wgpu.wgpuRenderPassEncoderSetScissorRect(pass, 0, 0, @intFromFloat(self.viewport_width), @intFromFloat(self.viewport_height));
-    }
+    // Scissor rect, clamped to whatever this pass draws into.
+    const scissor = dvui.render.clampScissor(clipr, self.pass_width, self.pass_height);
+    wgpu.wgpuRenderPassEncoderSetScissorRect(pass, scissor.x, scissor.y, scissor.w, scissor.h);
 
     // Bind instance buffer and draw 6 vertices (quad) for 1 instance
     wgpu.wgpuRenderPassEncoderSetVertexBuffer(pass, 0, self.sdf_instance_buffer, self.sdf_instance_byte_offset, inst_bytes_aligned);
@@ -1043,17 +1090,18 @@ pub fn renderTarget(self: *@This(), maybe_target: ?dvui.TextureTarget) void {
         }) orelse return;
 
         self.current_pass = new_pass;
+        self.current_target_view = render_view;
 
-        // Update projection for the target size
+        // The attachment is the texture now, so the scissor is measured against
+        // its size, not the window's.
         const w: f32 = @floatFromInt(target.width);
         const h: f32 = @floatFromInt(target.height);
-        const projection = [16]f32{
-            2.0 / w, 0,        0, 0,
-            0,       -2.0 / h, 0, 0,
-            0,       0,        1, 0,
-            -1,      1,        0, 1,
-        };
-        wgpu.wgpuQueueWriteBuffer(self.queue, self.uniform_buffer, 0, &projection, @sizeOf(@TypeOf(projection)));
+        self.pass_width = w;
+        self.pass_height = h;
+
+        // Its own slot: the pass this projection belongs to has not been
+        // submitted yet, and neither have the ones before it.
+        self.writeProjection(w, h);
     } else {
         // Restore to main surface
         self.restoreMainPass();
@@ -1082,15 +1130,11 @@ fn restoreMainPass(self: *@This()) void {
     }) orelse return;
 
     self.current_pass = new_pass;
+    self.current_target_view = null;
+    self.pass_width = self.viewport_width;
+    self.pass_height = self.viewport_height;
 
-    // Restore viewport projection
-    const w = self.viewport_width;
-    const h = self.viewport_height;
-    const projection = [16]f32{
-        2.0 / w, 0,        0, 0,
-        0,       -2.0 / h, 0, 0,
-        0,       0,        1, 0,
-        -1,      1,        0, 1,
-    };
-    wgpu.wgpuQueueWriteBuffer(self.queue, self.uniform_buffer, 0, &projection, @sizeOf(@TypeOf(projection)));
+    // Slot 0 already holds the window's projection and nothing overwrites it,
+    // so restoring the main pass is a change of offset, not a write.
+    self.uniform_slot = 0;
 }

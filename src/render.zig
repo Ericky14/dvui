@@ -830,3 +830,90 @@ const IconRenderOptions = dvui.IconRenderOptions;
 test {
     @import("std").testing.refAllDecls(@This());
 }
+
+/// The scissor rect for `clip`, clamped to a `w` x `h` attachment. A null clip
+/// means "all of it".
+///
+/// Clamping rather than trusting the caller, because the cost of being wrong is
+/// not a clipped triangle. A scissor that leaves its attachment is a validation
+/// error, and a backend like wgpu throws away the *whole submitted command
+/// buffer* for one of them — so a single stale clip renders the entire frame as
+/// nothing. That is exactly what happened to every `BlurBackdrop` capture: the
+/// capture pass drew into a 961x844 texture while the scissor still said the
+/// window's 1400x860.
+pub fn clampScissor(clip: ?Rect.Physical, w: f32, h: f32) struct { x: u32, y: u32, w: u32, h: u32 } {
+    const max_w: u32 = if (w > 0) @intFromFloat(w) else 0;
+    const max_h: u32 = if (h > 0) @intFromFloat(h) else 0;
+    if (max_w == 0 or max_h == 0) return .{ .x = 0, .y = 0, .w = 0, .h = 0 };
+    const c = clip orelse return .{ .x = 0, .y = 0, .w = max_w, .h = max_h };
+    const x: u32 = @min(max_w, @as(u32, @intFromFloat(@max(0, c.x))));
+    const y: u32 = @min(max_h, @as(u32, @intFromFloat(@max(0, c.y))));
+    return .{
+        .x = x,
+        .y = y,
+        .w = @min(@as(u32, @intFromFloat(@max(0, c.w))), max_w - x),
+        .h = @min(@as(u32, @intFromFloat(@max(0, c.h))), max_h - y),
+    };
+}
+
+/// Take the next slot of a per-frame ring, or null once they run out.
+///
+/// Null rather than wrapping, so the caller decides what a shortage means
+/// instead of silently writing over something another pass is still going to
+/// read. Slot 0 is conventionally reserved by starting `used` at 1.
+pub fn nextRingSlot(used: *u32, capacity: u32) ?u32 {
+    if (used.* >= capacity) return null;
+    const slot = used.*;
+    used.* += 1;
+    return slot;
+}
+
+test "a scissor is clamped to the attachment, not to the window" {
+    const testing = @import("std").testing;
+
+    // A null clip means the whole attachment.
+    const all = clampScissor(null, 961, 844);
+    try testing.expectEqual(@as(u32, 0), all.x);
+    try testing.expectEqual(@as(u32, 961), all.w);
+    try testing.expectEqual(@as(u32, 844), all.h);
+
+    // The window-sized clip that used to reach a smaller target. wgpu rejects
+    // the whole command buffer for this, so it has to come back trimmed.
+    const oversized = clampScissor(.{ .x = 0, .y = 0, .w = 1400, .h = 860 }, 961, 844);
+    try testing.expectEqual(@as(u32, 961), oversized.w);
+    try testing.expectEqual(@as(u32, 844), oversized.h);
+
+    // Offset clips are trimmed against the far edge, not just the size.
+    const offset = clampScissor(.{ .x = 900, .y = 800, .w = 400, .h = 400 }, 961, 844);
+    try testing.expectEqual(@as(u32, 900), offset.x);
+    try testing.expectEqual(@as(u32, 61), offset.w);
+    try testing.expectEqual(@as(u32, 44), offset.h);
+
+    // A clip entirely outside collapses instead of going negative.
+    const outside = clampScissor(.{ .x = 2000, .y = 2000, .w = 10, .h = 10 }, 961, 844);
+    try testing.expectEqual(@as(u32, 0), outside.w);
+    try testing.expectEqual(@as(u32, 0), outside.h);
+
+    // Negative origins clamp to zero rather than wrapping to four billion.
+    const negative = clampScissor(.{ .x = -20, .y = -20, .w = 100, .h = 100 }, 961, 844);
+    try testing.expectEqual(@as(u32, 0), negative.x);
+    try testing.expectEqual(@as(u32, 100), negative.w);
+
+    // A zero-sized attachment draws nothing rather than underflowing.
+    const empty = clampScissor(null, 0, 0);
+    try testing.expectEqual(@as(u32, 0), empty.w);
+}
+
+test "a per-frame ring hands out one slot at a time and reports exhaustion" {
+    const testing = @import("std").testing;
+    var used: u32 = 1;
+    try testing.expectEqual(@as(?u32, 1), nextRingSlot(&used, 4));
+    try testing.expectEqual(@as(?u32, 2), nextRingSlot(&used, 4));
+    try testing.expectEqual(@as(?u32, 3), nextRingSlot(&used, 4));
+    // Exhausted: null, so the caller degrades on purpose instead of writing
+    // past the end of the buffer.
+    try testing.expectEqual(@as(?u32, null), nextRingSlot(&used, 4));
+    // Slot 0 is never handed out when `used` starts at 1.
+    used = 1;
+    try testing.expect(nextRingSlot(&used, 4).? != 0);
+}
