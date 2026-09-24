@@ -552,6 +552,16 @@ pub fn deinit(self: *Dockspace) void {
     dvui.parentReset(self.data().id, self.data().parent);
 }
 
+/// Where a test presses to pick a tab up: its left quarter, on the title.
+///
+/// Not the tab's centre. A closable tab is a title AND a close button side by
+/// side, so for a one-letter title the centre is where the two meet — and
+/// under `snap_to_pixels` it lands on the close button's first pixel, which
+/// takes the press, closes nothing and starts no drag.
+fn testTabGrip(rect: dvui.Rect.Physical) dvui.Point.Physical {
+    return .{ .x = rect.x + rect.w / 4, .y = rect.y + rect.h / 2 };
+}
+
 fn testPanelInfo(id: Layout.PanelId) PanelInfo {
     return .{ .title = id, .closable = true };
 }
@@ -842,11 +852,11 @@ test "dockspace drag: dropping directly onto another leaf's tab (not just its co
     try dvui.testing.settle(fns.frame);
 
     const cw = dvui.currentWindow();
-    const a_center = dvui.tagGet("a").?.rect.center();
+    const a_grip = testTabGrip(dvui.tagGet("a").?.rect);
     // "b"'s own tab button (in the header, not its content area below).
     const b_tab = dvui.tagGet("b").?.rect.center();
 
-    _ = try cw.addEventMouseMotion(.{ .pt = a_center });
+    _ = try cw.addEventMouseMotion(.{ .pt = a_grip });
     _ = try cw.addEventMouseButton(.left, .press);
     _ = try dvui.testing.step(fns.frame);
 
@@ -892,13 +902,13 @@ test "dockspace drag: press+motion+release onto another leaf's center adds a new
     try dvui.testing.settle(fns.frame);
 
     const cw = dvui.currentWindow();
-    const a_center = dvui.tagGet("a").?.rect.center();
+    const a_grip = testTabGrip(dvui.tagGet("a").?.rect);
     // Window is 600x400 logical, "b" is the right half; scale to physical
     // so this lands well inside "b"'s content center zone regardless of dpi.
     const scale = dvui.windowNaturalScale();
     const b_target: dvui.Point.Physical = .{ .x = 450 * scale, .y = 200 * scale };
 
-    _ = try cw.addEventMouseMotion(.{ .pt = a_center });
+    _ = try cw.addEventMouseMotion(.{ .pt = a_grip });
     _ = try cw.addEventMouseButton(.left, .press);
     _ = try dvui.testing.step(fns.frame);
 
@@ -948,15 +958,15 @@ test "dockspace drag: release outside any zone floats the panel at the drop poin
     try dvui.testing.settle(fns.frame);
 
     const cw = dvui.currentWindow();
-    const a_center = dvui.tagGet("a").?.rect.center();
+    const a_grip = testTabGrip(dvui.tagGet("a").?.rect);
 
-    _ = try cw.addEventMouseMotion(.{ .pt = a_center });
+    _ = try cw.addEventMouseMotion(.{ .pt = a_grip });
     _ = try cw.addEventMouseButton(.left, .press);
     _ = try dvui.testing.step(fns.frame);
 
     // Drag well outside the whole dockspace rect: no leaf or root zone can
     // possibly contain this point, so the drop should float instead.
-    _ = try cw.addEventMouseMotion(.{ .pt = .{ .x = a_center.x, .y = -50 } });
+    _ = try cw.addEventMouseMotion(.{ .pt = .{ .x = a_grip.x, .y = -50 } });
     _ = try dvui.testing.step(fns.frame);
 
     _ = try cw.addEventMouseButton(.left, .release);

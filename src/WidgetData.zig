@@ -79,6 +79,9 @@ pub fn rectSet(self: *WidgetData, r: Rect) void {
 }
 
 pub fn register(self: *WidgetData) void {
+    if (dvui.snapToPixels() and !self.init_options.subwindow and !self.isRoot()) {
+        self.rect = self.snappedRect();
+    }
     self.rectSet(self.rect);
 
     if (self.options.theme) |t| {
@@ -188,6 +191,68 @@ pub fn register(self: *WidgetData) void {
             dvui.Debug.errorOutline(rs.r);
         }
     }
+}
+
+/// `rect`, moved and resized by less than a physical pixel so that the BORDER
+/// rect — the part that draws — has all four edges on whole physical pixels.
+///
+/// Under `snap_to_pixels` the layout promises what the text renderer already
+/// does: crisp output. A widget cannot keep that promise for itself, because
+/// its origin is inherited — a line box measured from a font, a gravity that
+/// centres it in leftover room, or a parent's 5 px inset (8.75 physical at
+/// 175 %) each hand a fraction to everything laid out after them. So the
+/// rounding happens here, once, where every laid-out widget passes.
+///
+/// Each edge rounds half UP (`floor(x + 0.5)`) rather than half away from
+/// zero, so a whole-pixel width stays exactly that width wherever it lands —
+/// on a negative coordinate (scrolled above the viewport) as well — and two
+/// siblings that share an edge still share it. Only a fractional width (an
+/// expanded widget's share of leftover room) can change, by under a pixel.
+/// Sizes that come from content are already whole: `minSizeSetAndRefresh`
+/// rounds them up.
+///
+/// A subwindow is placed in window coordinates by its own code
+/// (`FloatingWindowWidget` snaps itself) and the window root is the window.
+fn snappedRect(self: *const WidgetData) Rect {
+    const rs = self.parent.screenRectScale(self.rect);
+    const scale = rs.s;
+    if (!(scale > 0)) return self.rect;
+    const margin = self.options.marginGet();
+    const left = rs.r.x + margin.x * scale;
+    const top = rs.r.y + margin.y * scale;
+    const right = rs.r.x + rs.r.w - margin.w * scale;
+    const bottom = rs.r.y + rs.r.h - margin.h * scale;
+    if (!(right >= left and bottom >= top)) return self.rect;
+    const move_left = (roundHalfUp(left) - left) / scale;
+    const move_top = (roundHalfUp(top) - top) / scale;
+    const move_right = (roundHalfUp(right) - right) / scale;
+    const move_bottom = (roundHalfUp(bottom) - bottom) / scale;
+    return .{
+        .x = self.rect.x + move_left,
+        .y = self.rect.y + move_top,
+        .w = @max(0, self.rect.w + move_right - move_left),
+        .h = @max(0, self.rect.h + move_bottom - move_top),
+    };
+}
+
+fn roundHalfUp(value: f32) f32 {
+    return @floor(value + 0.5);
+}
+
+/// `size` (logical, at `scale` physical per logical) grown to the next whole
+/// number of physical pixels. A hair over a whole pixel — float noise from a
+/// sum of logical lengths — does not grow it.
+fn ceilToPixels(size: Size, scale: f32) Size {
+    if (!(scale > 0)) return size;
+    return .{
+        .w = ceilToPixelsAxis(size.w, scale),
+        .h = ceilToPixelsAxis(size.h, scale),
+    };
+}
+
+fn ceilToPixelsAxis(length: f32, scale: f32) f32 {
+    if (length <= 0 or length >= dvui.max_float_safe) return length;
+    return @ceil(length * scale - 0.001) / scale;
 }
 
 pub fn visible(self: *const WidgetData) bool {
@@ -334,6 +399,15 @@ pub fn minSizeMax(self: *WidgetData, s: Size) void {
 
 pub fn minSizeSetAndRefresh(self: *WidgetData) void {
     self.min_size = self.min_size.min(self.options.max_sizeGet());
+    // Under `snap_to_pixels` what a widget asks for is a whole number of
+    // physical pixels, rounded UP so nothing it measured is cut: a label's
+    // line box of 23.4 physical px asks for 24. Then a stack of such widgets
+    // is whole at every step, and `snappedRect` never has to shrink a widget
+    // that is exactly as big as its text to put it on a pixel (which would
+    // ellipsize the text).
+    if (dvui.snapToPixels() and !self.isRoot()) {
+        self.min_size = ceilToPixels(self.min_size, self.rectScale().s);
+    }
 
     if (dvui.minSizeGet(self.id)) |ms| {
         // If the size we got was exactly our previous min size then our min size
@@ -415,4 +489,112 @@ pub inline fn accesskit_node(self: *const WidgetData) ?*dvui.AccessKit.Node {
 
 test {
     @import("std").testing.refAllDecls(@This());
+}
+
+/// Every captured widget's border rect, as the four physical edges, with the
+/// widgets that cannot be judged (the window root, empty or hidden rects)
+/// left out. The caller owns nothing; the slice is the capture's.
+fn testFractionalEdges(scale_note: f32) !usize {
+    const capture = dvui.debug.lastCapture() orelse return error.NoCapture;
+    var fractional: usize = 0;
+    for (capture.widgets.items) |widget| {
+        if (widget.parent_id == widget.id) continue;
+        if (!widget.visible) continue;
+        const rect = widget.rect_border;
+        if (rect.w <= 0 or rect.h <= 0) continue;
+        const edges = [_]f32{ rect.x, rect.y, rect.x + rect.w, rect.y + rect.h };
+        for (edges) |edge| {
+            if (@abs(edge - @round(edge)) > 0.01) {
+                fractional += 1;
+                std.debug.print("  {d}: {s}:{d} {s} edge {d:.3}\n", .{ scale_note, widget.src_file, widget.src_line, widget.name orelse "?", edge });
+                break;
+            }
+        }
+    }
+    return fractional;
+}
+
+test "under snap_to_pixels a laid-out widget's border lands on whole physical pixels" {
+    // At 175 % a logical pixel is 1.75 physical ones, and three things put a
+    // widget on a fraction: a size MEASURED from a font (a label's line box is
+    // 13.37 logical px, 23.4 physical), a gravity that centres something in
+    // leftover room, and an inset that is not a whole number of physical pixels
+    // (5 logical is 8.75). Each hands its fraction to everything laid out
+    // after it, so no widget can fix it for itself: the editor's lint kept
+    // finding a dropdown and a button a fraction off in the property grid
+    // however their own sizes were snapped. `snap_to_pixels` is dvui's
+    // promise of crisp output, so the layout keeps it too.
+    const Local = struct {
+        var choice: usize = 0;
+
+        fn frame() !dvui.App.Result {
+            var page = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .both });
+            defer page.deinit();
+            // A size measured from a font…
+            dvui.labelNoFmt(@src(), "Transform", .{}, .{});
+            // …and a filled box stacked under it, which inherits the fraction.
+            var strip = dvui.box(@src(), .{}, .{ .background = true, .min_size_content = .{ .w = 100, .h = 20 } });
+            strip.deinit();
+            // A cell of one control height with a dropdown centred in it: the
+            // editor's property grid.
+            {
+                var cell = dvui.box(@src(), .{ .dir = .horizontal }, .{
+                    .expand = .horizontal,
+                    .min_size_content = .{ .w = 0, .h = 28 },
+                    .max_size_content = .{ .w = dvui.max_float_safe, .h = 28 },
+                });
+                defer cell.deinit();
+                _ = dvui.dropdown(@src(), &.{ "Box", "Sphere" }, .{ .choice = &choice }, .{}, .{ .gravity_y = 0.5 });
+            }
+            // An inset of 5 logical px around a button.
+            {
+                var host = dvui.box(@src(), .{}, .{ .padding = .all(5), .background = true });
+                defer host.deinit();
+                _ = dvui.button(@src(), "Send", .{}, .{});
+            }
+            return .ok;
+        }
+    };
+
+    for ([_]f32{ 1.0, 1.75, 2.0 }) |scale| {
+        var t = try dvui.testing.init(.{ .window_size = .{ .w = 300, .h = 240 } });
+        defer t.deinit();
+        // The testing backend's natural scale is 2 (pixels are twice the
+        // window size), so this is the physical-per-logical scale asked for.
+        t.window.content_scale = scale / 2;
+        try dvui.testing.settle(Local.frame);
+        dvui.debug.captureFrame();
+        _ = try dvui.testing.step(Local.frame);
+        _ = try dvui.testing.step(Local.frame);
+        defer dvui.debug.clearCaptures(std.testing.allocator);
+        try std.testing.expectEqual(@as(usize, 0), try testFractionalEdges(scale));
+    }
+}
+
+test "without snap_to_pixels the layout keeps its fractions" {
+    // The other half: the rounding is `snap_to_pixels`, not a change to every
+    // layout. A caller that turns it off — a zoomed canvas that wants smooth
+    // sub-pixel motion — keeps the exact positions, and this frame at 175 % is
+    // the proof that the previous test can fail at all.
+    const Local = struct {
+        fn frame() !dvui.App.Result {
+            var page = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .both });
+            defer page.deinit();
+            dvui.labelNoFmt(@src(), "Transform", .{}, .{});
+            var strip = dvui.box(@src(), .{}, .{ .background = true, .min_size_content = .{ .w = 100, .h = 20 } });
+            strip.deinit();
+            return .ok;
+        }
+    };
+    var t = try dvui.testing.init(.{ .window_size = .{ .w = 300, .h = 240 } });
+    defer t.deinit();
+    t.window.content_scale = 1.75 / 2.0;
+    const previous = dvui.snapToPixelsSet(false);
+    defer _ = dvui.snapToPixelsSet(previous);
+    try dvui.testing.settle(Local.frame);
+    dvui.debug.captureFrame();
+    _ = try dvui.testing.step(Local.frame);
+    _ = try dvui.testing.step(Local.frame);
+    defer dvui.debug.clearCaptures(std.testing.allocator);
+    try std.testing.expect(try testFractionalEdges(1.75) > 0);
 }

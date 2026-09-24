@@ -18,8 +18,16 @@ GPU SDF rounded-rect pipeline, `BoxWidget` gap support, and more. When changing
 shared widgets, assume downstream (`dvui-ds`, `src/editor`) depends on current
 behavior — check before altering public APIs or visuals.
 
-One divergence that changes what a frame looks like or says (2026-09-24):
+Two divergences that change what a frame looks like or says (2026-09-24):
 
+- **The layout keeps `snap_to_pixels`.** Min sizes are rounded UP to whole
+  physical pixels (`WidgetData.minSizeSetAndRefresh`) and every laid-out
+  widget's border rect is rounded half-up to whole physical pixels at
+  `register` (`WidgetData.snappedRect`; subwindows and the root excluded). A
+  fraction from a font's line box, a gravity or a 5 px inset at 175 % stops at
+  the first widget. Turn `snap_to_pixels` off for sub-pixel motion.
+  Tests: "under snap_to_pixels a laid-out widget's border lands on whole
+  physical pixels", "without snap_to_pixels the layout keeps its fractions".
 - **`SdfRect` is a CSS box; `Rect.stroke` is a centre line.** The SDF border is
   the band from the rect's edge inward (`wgpu_sdf_rect.wgsl`); `Rect.stroke`
   grows its path by half the thickness before using the SDF pipeline, and the
