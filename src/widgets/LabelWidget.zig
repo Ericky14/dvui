@@ -109,6 +109,8 @@ pub fn initNoFmtAllocator(self: *LabelWidget, src: std.builtin.SourceLocation, l
     };
 
     self.data().register();
+    // What a frame dump says this widget shows (`Debug.captureFrame`).
+    if (dvui.debug.capturing) dvui.debug.captureLabel(dvui.currentWindow().gpa, self.data().id, label_str);
     self.data().borderAndBackground(.{});
 
     if (self.data().accesskit_node()) |ak_node| {

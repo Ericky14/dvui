@@ -18,7 +18,7 @@ GPU SDF rounded-rect pipeline, `BoxWidget` gap support, and more. When changing
 shared widgets, assume downstream (`dvui-ds`, `src/editor`) depends on current
 behavior — check before altering public APIs or visuals.
 
-Two divergences that change what a frame looks like or says (2026-09-24):
+Three divergences that change what a frame looks like or says (2026-09-24):
 
 - **The layout keeps `snap_to_pixels`.** Min sizes are rounded UP to whole
   physical pixels (`WidgetData.minSizeSetAndRefresh`) and every laid-out
@@ -35,6 +35,11 @@ Two divergences that change what a frame looks like or says (2026-09-24):
   edge, so the testing backend draws the pixels wgpu does. Tests in
   `src/render.zig` ("an SDF rect's border runs inward…", "a rounded stroke is
   centred on its path…").
+- **The frame capture records the margin rect and the text.**
+  `Debug.CapturedWidget.rect_margin` (what the parent gave, margin included) and
+  `.label` (a label's string, a text layout's runs, or `Options.label.text`,
+  capped at `label_capture_max` bytes), both in `dumpFrame`/`dumpDiff`. Test:
+  "a captured widget carries its margin rect and the text it shows".
 
 ## Build & test
 

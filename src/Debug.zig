@@ -81,9 +81,24 @@ pub const CapturedWidget = struct {
     src_file: []const u8,
     src_fn: []const u8,
     src_line: u32,
+    /// The whole rect the widget was given, INCLUDING its margin — what its
+    /// parent laid out. `rect_border` is this inset by the margin, so the
+    /// margin itself is `rect_border` minus `rect_margin`, edge by edge.
+    rect_margin: Rect.Physical,
     rect_border: Rect.Physical,
     rect_content: Rect.Physical,
     rect_background: Rect.Physical,
+    /// The text the widget shows, when it draws text: a `LabelWidget`'s string,
+    /// every run a `TextLayoutWidget` was given this frame (joined, in order —
+    /// a text entry's content or placeholder lands on its text layout, already
+    /// obfuscated for a password field), or an accessibility
+    /// `Options.label.text`. `gpa`-owned, capped at `label_capture_max` bytes
+    /// on a UTF-8 boundary. Null for a widget that shows no text.
+    label: ?[]const u8 = null,
+    /// Whether `label` came from drawn text (`captureLabel`) rather than an
+    /// accessibility label, so the first drawn run replaces the latter and
+    /// every later run appends.
+    label_drawn: bool = false,
     expand: Options.Expand,
     gravity: Options.Gravity,
     /// Subwindow (floating window / popup) this widget belongs to.
@@ -205,7 +220,10 @@ pub fn captureScopeEnd(self: *Debug) void {
 }
 
 fn freeFrame(gpa: std.mem.Allocator, frame: *CapturedFrame) void {
-    for (frame.widgets.items) |w| if (w.name) |name| gpa.free(name);
+    for (frame.widgets.items) |w| {
+        if (w.name) |name| gpa.free(name);
+        if (w.label) |label| gpa.free(label);
+    }
     frame.widgets.deinit(gpa);
 }
 
@@ -237,6 +255,14 @@ pub fn captureWidget(self: *Debug, gpa: std.mem.Allocator, wd: *const dvui.Widge
     if (self.frames.items.len == 0) return;
     const frame = &self.frames.items[self.frames.items.len - 1];
     const name: ?[]const u8 = if (wd.options.name) |n| (gpa.dupe(u8, n) catch null) else null;
+    // An accessibility label written as text is the only text a widget that
+    // draws none (an icon button) carries; a widget that does draw text
+    // replaces it through `captureLabel`.
+    const accessible: []const u8 = if (wd.options.label) |label| switch (label) {
+        .text => |text| text,
+        else => "",
+    } else "";
+    const label: ?[]const u8 = if (accessible.len == 0) null else gpa.dupe(u8, labelPrefix(accessible)) catch null;
     frame.widgets.append(gpa, .{
         .id = wd.id,
         .parent_id = wd.parent.data().id,
@@ -244,6 +270,8 @@ pub fn captureWidget(self: *Debug, gpa: std.mem.Allocator, wd: *const dvui.Widge
         .src_file = wd.src.file,
         .src_fn = wd.src.fn_name,
         .src_line = wd.src.line,
+        .rect_margin = wd.rectScale().r,
+        .label = label,
         .rect_border = wd.borderRectScale().r,
         .rect_content = wd.contentRectScale().r,
         .rect_background = wd.backgroundRectScale().r,
@@ -261,8 +289,59 @@ pub fn captureWidget(self: *Debug, gpa: std.mem.Allocator, wd: *const dvui.Widge
         .visible = wd.visible(),
     }) catch |err| {
         if (name) |n| gpa.free(n);
+        if (label) |text| gpa.free(text);
         dvui.logError(@src(), err, "Debug.captureWidget could not append", .{});
     };
+}
+
+/// The most text one captured widget keeps, in bytes. A label is for knowing
+/// WHICH widget a line of the dump is — "Save", "Position", the first words of
+/// a message — not a copy of a chat log, which would make every dump of a long
+/// conversation megabytes of JSON.
+pub const label_capture_max: usize = 256;
+
+/// `text`, cut to at most `label_capture_max` bytes without splitting a UTF-8
+/// sequence.
+fn labelPrefix(text: []const u8) []const u8 {
+    if (text.len <= label_capture_max) return text;
+    var end = label_capture_max;
+    // Back off over continuation bytes (0b10xxxxxx) to the start of a sequence.
+    while (end > 0 and (text[end] & 0xC0) == 0x80) end -= 1;
+    return text[0..end];
+}
+
+/// Record the text a widget shows, for `dumpFrame`'s `label`. Called by the
+/// widgets that draw text (`LabelWidget` once, `TextLayoutWidget` once per run)
+/// while `capturing`; a widget that adds several runs gets them joined in
+/// order, and the first run replaces an accessibility label. Best-effort like
+/// `captureWidget`: an allocation failure keeps what was already recorded.
+pub fn captureLabel(self: *Debug, gpa: std.mem.Allocator, id: dvui.Id, text: []const u8) void {
+    if (!self.capturing or text.len == 0) return;
+    if (self.frames.items.len == 0) return;
+    const frame = &self.frames.items[self.frames.items.len - 1];
+    // Newest first: the widget drawing its text registered last, bar whatever
+    // children it has already started.
+    var index = frame.widgets.items.len;
+    const widget = while (index > 0) {
+        index -= 1;
+        const candidate = &frame.widgets.items[index];
+        if (candidate.id == id) break candidate;
+    } else return;
+
+    const existing: []const u8 = if (widget.label_drawn) (widget.label orelse "") else "";
+    widget.label_drawn = true;
+    if (existing.len >= label_capture_max) return;
+    const joined = std.mem.concat(gpa, u8, &.{ existing, labelPrefix(text) }) catch |err| {
+        dvui.logError(@src(), err, "Debug.captureLabel could not append", .{});
+        return;
+    };
+    const kept = labelPrefix(joined);
+    const owned = if (kept.len == joined.len) joined else blk: {
+        defer gpa.free(joined);
+        break :blk gpa.dupe(u8, kept) catch return;
+    };
+    if (widget.label) |old| gpa.free(old);
+    widget.label = owned;
 }
 
 /// Emit the most recent captured frame as JSON: `{"widgets":[...]}`. `nested`
@@ -405,6 +484,8 @@ fn dumpFields(writer: *std.Io.Writer, n: *const CapturedWidget) std.Io.Writer.Er
     try writer.writeAll(",\"fn\":");
     try dumpString(writer, n.src_fn);
     try writer.print(",\"line\":{d}}}", .{n.src_line});
+    try dumpLabeled(writer, "label", n.label);
+    try dumpLabeled(writer, "rect_margin", n.rect_margin);
     try dumpLabeled(writer, "rect_border", n.rect_border);
     try dumpLabeled(writer, "rect_content", n.rect_content);
     try dumpLabeled(writer, "rect_background", n.rect_background);
@@ -430,6 +511,8 @@ fn dumpFields(writer: *std.Io.Writer, n: *const CapturedWidget) std.Io.Writer.Er
 fn widgetChanged(a: *const CapturedWidget, b: *const CapturedWidget) bool {
     return a.parent_id != b.parent_id or
         !optStrEql(a.name, b.name) or
+        !optStrEql(a.label, b.label) or
+        !std.meta.eql(a.rect_margin, b.rect_margin) or
         !std.meta.eql(a.rect_border, b.rect_border) or
         !std.meta.eql(a.rect_content, b.rect_content) or
         !std.meta.eql(a.rect_background, b.rect_background) or
@@ -452,6 +535,8 @@ fn dumpWidgetChanges(writer: *std.Io.Writer, a: *const CapturedWidget, b: *const
     var first = true;
     try diffField(writer, &first, "parent_id", a.parent_id, b.parent_id);
     if (!optStrEql(a.name, b.name)) try diffEmit(writer, &first, "name", a.name, b.name);
+    if (!optStrEql(a.label, b.label)) try diffEmit(writer, &first, "label", a.label, b.label);
+    try diffField(writer, &first, "rect_margin", a.rect_margin, b.rect_margin);
     try diffField(writer, &first, "rect_border", a.rect_border, b.rect_border);
     try diffField(writer, &first, "rect_content", a.rect_content, b.rect_content);
     try diffField(writer, &first, "rect_background", a.rect_background, b.rect_background);
@@ -1856,6 +1941,93 @@ test "dumpFrame captures the widget tree as JSON" {
     const flat = w2.buffered();
     try std.testing.expect(std.mem.indexOf(u8, flat, "\"children\":") == null);
     try std.testing.expect(std.mem.indexOf(u8, flat, "\"parent_id\":") != null);
+}
+
+test "a captured widget carries its margin rect and the text it shows" {
+    // The two things a layout dump could not say before: where a widget's
+    // MARGIN ends (so a rule no longer has to guess it from the other axis) and
+    // what text it draws (so a line of the dump can be found by its words).
+    var t = try dvui.testing.init(.{});
+    defer t.deinit();
+
+    const Local = struct {
+        var entry_buffer: [32]u8 = @splat(0);
+        // 200 two-byte characters: 400 bytes, over the cap, with the cap
+        // (256) falling on a character boundary only by luck of the parity.
+        const long_text: [401]u8 = blk: {
+            var out: [401]u8 = undefined;
+            out[0] = 'x';
+            for (0..200) |index| {
+                out[1 + index * 2] = 0xC3;
+                out[2 + index * 2] = 0xA9;
+            }
+            break :blk out;
+        };
+
+        fn frame() !dvui.App.Result {
+            var box = dvui.box(@src(), .{}, .{ .expand = .both, .name = "outer" });
+            defer box.deinit();
+            dvui.labelNoFmt(@src(), "Position", .{}, .{
+                .name = "caption",
+                .margin = .{ .x = 3, .y = 5, .w = 7, .h = 11 },
+            });
+            // A text layout gets its text in runs; the capture keeps them in order.
+            var layout = dvui.textLayout(@src(), .{}, .{ .name = "prose" });
+            layout.addText("Hello, ", .{});
+            layout.addText("world", .{});
+            layout.deinit();
+            // An icon-only control names itself through its accessibility label.
+            var icon_box = dvui.box(@src(), .{}, .{ .name = "icon", .label = .{ .text = "Close" } });
+            icon_box.deinit();
+            // A long label is kept to a prefix, never split inside a character.
+            dvui.labelNoFmt(@src(), &long_text, .{}, .{ .name = "long" });
+            var entry = dvui.textEntry(@src(), .{ .text = .{ .buffer = &entry_buffer }, .placeholder = "Search" }, .{ .name = "field" });
+            entry.deinit();
+            return .ok;
+        }
+    };
+
+    try dvui.testing.settle(Local.frame);
+    dvui.debug.captureFrame();
+    _ = try dvui.testing.step(Local.frame);
+    _ = try dvui.testing.step(Local.frame);
+    defer dvui.debug.clearCaptures(std.testing.allocator);
+
+    const buf = try std.testing.allocator.alloc(u8, 128 * 1024);
+    defer std.testing.allocator.free(buf);
+    var writer = std.Io.Writer.fixed(buf);
+    try dvui.debug.dumpFrame(&writer, .{ .shape = .flat });
+    const json = writer.buffered();
+
+    // The JSON says both, for every widget.
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"rect_margin\":") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"label\":\"Position\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"label\":\"Hello, world\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"label\":\"Close\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"label\":\"Search\"") != null);
+
+    // And the numbers are the widget's own: the margin rect is the border rect
+    // grown by exactly the margin it was given, edge by edge.
+    const capture = dvui.debug.lastCapture().?;
+    var caption: ?*const CapturedWidget = null;
+    var long: ?*const CapturedWidget = null;
+    for (capture.widgets.items) |*widget| {
+        const name = widget.name orelse continue;
+        if (std.mem.eql(u8, name, "caption")) caption = widget;
+        if (std.mem.eql(u8, name, "long")) long = widget;
+    }
+    const scale = dvui.windowNaturalScale();
+    const margin = caption.?.rect_margin;
+    const border = caption.?.rect_border;
+    try std.testing.expectApproxEqAbs(3 * scale, border.x - margin.x, 0.001);
+    try std.testing.expectApproxEqAbs(5 * scale, border.y - margin.y, 0.001);
+    try std.testing.expectApproxEqAbs(7 * scale, (margin.x + margin.w) - (border.x + border.w), 0.001);
+    try std.testing.expectApproxEqAbs(11 * scale, (margin.y + margin.h) - (border.y + border.h), 0.001);
+
+    const kept = long.?.label.?;
+    try std.testing.expect(kept.len <= label_capture_max);
+    try std.testing.expect(kept.len > label_capture_max - 2);
+    try std.testing.expect(std.unicode.utf8ValidateSlice(kept));
 }
 
 /// Frame counter for `diffFrame`, which renders slightly different content on
