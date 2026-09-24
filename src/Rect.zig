@@ -235,10 +235,22 @@ pub fn RectType(comptime units: dvui.enums.Units) type {
             // (`after`) strokes and gradients go through the tessellated path.
             if (sdfRadii(corners)) |radii| {
                 if (opts.color == .color and !opts.after) {
+                    // `self` is the stroke's CENTRE line, as for every path
+                    // stroke; an `SdfRect` is the OUTER edge with its border
+                    // running inward. Grow the rect and each round corner by
+                    // half the thickness, or the line lands half a stroke
+                    // inside where the tessellated path puts it — a 1 px
+                    // border straddling two pixels at half strength.
+                    const half = opts.thickness / 2;
                     dvui.renderSdfRect(.{
-                        .pos = .{ .x = self.x, .y = self.y },
-                        .size = .{ .w = self.w, .h = self.h },
-                        .radii = radii,
+                        .pos = .{ .x = self.x - half, .y = self.y - half },
+                        .size = .{ .w = self.w + opts.thickness, .h = self.h + opts.thickness },
+                        .radii = .{
+                            .x = if (radii.x > 0) radii.x + half else 0,
+                            .y = if (radii.y > 0) radii.y + half else 0,
+                            .w = if (radii.w > 0) radii.w + half else 0,
+                            .h = if (radii.h > 0) radii.h + half else 0,
+                        },
                         .fill_color = dvui.Color{ .r = 0, .g = 0, .b = 0, .a = 0 },
                         .border_color = opts.color.color,
                         .border_width = opts.thickness,

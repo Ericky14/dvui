@@ -137,9 +137,28 @@ fn drawSdfRectFallback(self: Backend, sdf_rect: dvui.SdfRect, clipr: ?dvui.Rect.
         path.build().fillConvex(.{ .color = .{ .color = sdf_rect.fill_color }, .fade = @max(1.0, sdf_rect.softness) });
     }
     if (sdf_rect.border_width > 0 and sdf_rect.border_color.a > 0) {
+        // The SDF border is the band from the rect's edge INWARD by
+        // `border_width` (`wgpu_sdf_rect.wgsl`: `outer_alpha - inner_alpha`,
+        // both measured from the rect's own edge). A path stroke straddles its
+        // path, so stroke the line half a border inside the edge, with each
+        // corner's radius shrunk by the same half — or every CPU rendering puts
+        // a rounded border half a stroke OUTSIDE where the GPU draws it.
+        const half = sdf_rect.border_width / 2;
+        const centre: dvui.Rect.Physical = .{
+            .x = rect.x + half,
+            .y = rect.y + half,
+            .w = @max(0, rect.w - sdf_rect.border_width),
+            .h = @max(0, rect.h - sdf_rect.border_width),
+        };
+        const centre_corners: dvui.CornerRect.Physical = .{
+            .tl = .round(@max(0, sdf_rect.radii.x - half)),
+            .tr = .round(@max(0, sdf_rect.radii.y - half)),
+            .br = .round(@max(0, sdf_rect.radii.w - half)),
+            .bl = .round(@max(0, sdf_rect.radii.h - half)),
+        };
         var path: dvui.Path.Builder = .init(dvui.currentWindow().lifo());
         defer path.deinit();
-        path.addRect(rect, corners);
+        path.addRect(centre, centre_corners);
         path.build().stroke(.{ .thickness = sdf_rect.border_width, .color = .{ .color = sdf_rect.border_color }, .closed = true });
     }
 }

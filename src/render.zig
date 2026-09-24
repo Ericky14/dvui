@@ -917,3 +917,100 @@ test "a per-frame ring hands out one slot at a time and reports exhaustion" {
     used = 1;
     try testing.expect(nextRingSlot(&used, 4).? != 0);
 }
+
+// ─── Where a rounded border's pixels land ────────────────────────────────────
+
+/// Draw with `draw` into a fresh `size` x `size` render target at the origin and
+/// read the pixels back. Caller owns the slice.
+fn testDrawAndRead(size: u32, draw: *const fn () anyerror!void) ![]Color.PMA {
+    const target = try dvui.textureCreateTarget(.{ .width = size, .height = size });
+    const previous = dvui.renderTarget(.{ .texture = target, .offset = .{} });
+    try draw();
+    _ = dvui.renderTarget(previous);
+    const pixels = try dvui.textureReadTarget(std.testing.allocator, target);
+    target.destroyLater();
+    return pixels;
+}
+
+/// The alpha of each pixel of one row, from `first` to `last` inclusive.
+fn testRowAlphas(pixels: []const Color.PMA, size: u32, row: u32, comptime first: u32, comptime last: u32) [last - first + 1]u8 {
+    var out: [last - first + 1]u8 = undefined;
+    for (first..last + 1, 0..) |column, index| out[index] = pixels[row * size + column].a;
+    return out;
+}
+
+test "an SDF rect's border runs inward from its own edge, on every backend" {
+    // `SdfRect` is a CSS box: its border is the band from the rect's edge
+    // INWARD by `border_width` — that is what `wgpu_sdf_rect.wgsl` draws
+    // (`outer_alpha - inner_alpha`, both measured from the rect's own edge).
+    // A backend without an SDF pipeline takes `drawSdfRectFallback`, and it has
+    // to put the pixels in the same place, or every test rendered on the CPU
+    // describes a picture the GPU never draws.
+    var t = try dvui.testing.init(.{ .window_size = .{ .w = 40, .h = 40 } });
+    defer t.deinit();
+
+    const Local = struct {
+        fn draw() anyerror!void {
+            try renderSdfRect(.{
+                .pos = .{ .x = 10, .y = 10 },
+                .size = .{ .w = 20, .h = 20 },
+                .radii = .all(6),
+                .fill_color = .transparent,
+                .border_color = .white,
+                .border_width = 1,
+            });
+        }
+    };
+    const pixels = try testDrawAndRead(40, &Local.draw);
+    defer std.testing.allocator.free(pixels);
+
+    // Halfway down the left side, on the straight run past the corner: column
+    // 10 is the border, 9 is outside the rect and 11 is inside the border.
+    const alphas = testRowAlphas(pixels, 40, 20, 9, 11);
+    try std.testing.expect(alphas[0] < 16);
+    try std.testing.expect(alphas[1] > 240);
+    try std.testing.expect(alphas[2] < 16);
+}
+
+test "a rounded stroke is centred on its path, whichever pipeline draws it" {
+    // `Rect.stroke` takes the stroke's CENTRE line, like every `Path` stroke —
+    // `WidgetData.borderAndBackground` insets the border rect by half the border
+    // before calling it. A solid colour on round corners goes to the SDF
+    // pipeline, whose rect is the stroke's OUTER edge, so the path has to be
+    // grown by half the thickness on the way in. Passing the centre line as-is
+    // put every rounded border half a stroke inside where the tessellated path
+    // draws it: a one-pixel line became two half-bright ones on the GPU — the
+    // glass hairline zigame's live drive at 175 % found (docs/ROADMAP.md,
+    // Phase 9).
+    var t = try dvui.testing.init(.{ .window_size = .{ .w = 40, .h = 40 } });
+    defer t.deinit();
+
+    const Local = struct {
+        // Centre line on a half pixel, so a 1 px stroke covers exactly column 10.
+        const thin_path: Rect.Physical = .{ .x = 10.5, .y = 10.5, .w = 19, .h = 19 };
+        // Centre line on a whole pixel, so a 2 px stroke covers columns 10 and 11.
+        const thick_path: Rect.Physical = .{ .x = 11, .y = 11, .w = 18, .h = 18 };
+
+        fn thin() anyerror!void {
+            thin_path.stroke(.round(6), .{ .thickness = 1, .color = .{ .color = .white } });
+        }
+        fn thick() anyerror!void {
+            thick_path.stroke(.round(6), .{ .thickness = 2, .color = .{ .color = .white } });
+        }
+    };
+
+    const thin = try testDrawAndRead(40, &Local.thin);
+    defer std.testing.allocator.free(thin);
+    const thin_row = testRowAlphas(thin, 40, 20, 9, 11);
+    try std.testing.expect(thin_row[0] < 16);
+    try std.testing.expect(thin_row[1] > 240);
+    try std.testing.expect(thin_row[2] < 16);
+
+    const thick = try testDrawAndRead(40, &Local.thick);
+    defer std.testing.allocator.free(thick);
+    const thick_row = testRowAlphas(thick, 40, 20, 9, 12);
+    try std.testing.expect(thick_row[0] < 16);
+    try std.testing.expect(thick_row[1] > 240);
+    try std.testing.expect(thick_row[2] > 240);
+    try std.testing.expect(thick_row[3] < 16);
+}

@@ -18,6 +18,16 @@ GPU SDF rounded-rect pipeline, `BoxWidget` gap support, and more. When changing
 shared widgets, assume downstream (`dvui-ds`, `src/editor`) depends on current
 behavior — check before altering public APIs or visuals.
 
+One divergence that changes what a frame looks like or says (2026-09-24):
+
+- **`SdfRect` is a CSS box; `Rect.stroke` is a centre line.** The SDF border is
+  the band from the rect's edge inward (`wgpu_sdf_rect.wgsl`); `Rect.stroke`
+  grows its path by half the thickness before using the SDF pipeline, and the
+  CPU fallback (`Backend.drawSdfRectFallback`) strokes half a border inside the
+  edge, so the testing backend draws the pixels wgpu does. Tests in
+  `src/render.zig` ("an SDF rect's border runs inward…", "a rounded stroke is
+  centred on its path…").
+
 ## Build & test
 
 **Compiler: Zig master only.** `build.zig` targets the 2026-05 configurer/maker
