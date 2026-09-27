@@ -896,6 +896,13 @@ pub const Cache = struct {
 
         pub fn kern(fce: *Entry, codepoint1: u32, codepoint2: u32) f32 {
             if (impl == .FreeType) {
+                // A face without a legacy `kern` table has nothing for
+                // `FT_Get_Kerning` to read: it answers zero for every pair.
+                // Asking anyway cost two cmap lookups and the call itself for
+                // EVERY glyph of every line measured or drawn — a sixteenth of
+                // an idle editor frame, on fonts (Geist: GPOS only) that can
+                // never answer anything but zero.
+                if (!hasKerning(fce.face)) return 0;
                 const index1 = c.FT_Get_Char_Index(fce.face, codepoint1);
                 const index2 = c.FT_Get_Char_Index(fce.face, codepoint2);
                 var k: c.FT_Vector = undefined;
@@ -1175,6 +1182,43 @@ pub const FreeType = struct {
     }
 };
 
+/// Whether FreeType holds kerning data for `face` (`FT_HAS_KERNING`): the one
+/// thing `FT_Get_Kerning` can read. A face without it answers zero for every
+/// pair, so `Entry.kern` does not ask.
+fn hasKerning(face: anytype) bool {
+    return (face.*.face_flags & c.FT_FACE_FLAG_KERNING) != 0;
+}
+
 test {
     @import("std").testing.refAllDecls(@This());
+}
+
+test "a face with no kern table is never asked for a pair, and one with it still kerns" {
+    if (impl != .FreeType) return error.SkipZigTest;
+    var library: c.FT_Library = undefined;
+    try FreeType.intToError(c.FT_Init_FreeType(&library));
+    defer _ = c.FT_Done_FreeType(library);
+
+    // Bitstream Vera carries a legacy `kern` table: "AV" pulls together.
+    const vera = @embedFile("fonts/bitstream-vera/Vera.ttf");
+    var kerned: c.FT_Face = undefined;
+    try FreeType.intToError(c.FT_New_Memory_Face(library, vera.ptr, vera.len, 0, &kerned));
+    defer _ = c.FT_Done_Face(kerned);
+    try FreeType.intToError(c.FT_Set_Pixel_Sizes(kerned, 0, 32));
+    try std.testing.expect(hasKerning(kerned));
+    var pair: c.FT_Vector = undefined;
+    try FreeType.intToError(c.FT_Get_Kerning(kerned, c.FT_Get_Char_Index(kerned, 'A'), c.FT_Get_Char_Index(kerned, 'V'), c.FT_KERNING_DEFAULT, &pair));
+    try std.testing.expect(pair.x < 0);
+
+    // Hack has none (like Geist, whose kerning is GPOS only, which
+    // `FT_Get_Kerning` never reads): every pair is zero, so the check skips
+    // two cmap lookups and the call for each glyph drawn.
+    const hack = @embedFile("fonts/hack/Hack-Regular.ttf");
+    var plain: c.FT_Face = undefined;
+    try FreeType.intToError(c.FT_New_Memory_Face(library, hack.ptr, hack.len, 0, &plain));
+    defer _ = c.FT_Done_Face(plain);
+    try FreeType.intToError(c.FT_Set_Pixel_Sizes(plain, 0, 32));
+    try std.testing.expect(!hasKerning(plain));
+    try FreeType.intToError(c.FT_Get_Kerning(plain, c.FT_Get_Char_Index(plain, 'A'), c.FT_Get_Char_Index(plain, 'V'), c.FT_KERNING_DEFAULT, &pair));
+    try std.testing.expectEqual(@as(c.FT_Pos, 0), pair.x);
 }

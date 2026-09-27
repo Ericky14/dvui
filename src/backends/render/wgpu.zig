@@ -15,6 +15,25 @@
 //!
 //! `renderTargetViewCount` / `textureViewCount` are there for a host to assert
 //! on: over a steady UI they must come back to the same number every frame.
+//!
+//! ## One queue write per buffer per frame
+//!
+//! A draw does not upload anything. Its vertices, indices or SDF instance are
+//! staged on the CPU (`dvui.render.StagedUploads`) and the draw is recorded
+//! against the offset they will land at, with the WHOLE buffer bound once per
+//! pass and the draw picking its slice (`base_vertex`, `first_index`,
+//! `first_instance`); `end` — which dvui calls from `Window.end`, before the
+//! host submits — writes each buffer once. State a pass already has
+//! (pipeline, bind groups, scissor, buffers) is not set again
+//! (`dvui.render.passNeeds`). It used to be two `wgpuQueueWriteBuffer`s per
+//! text run and one per rounded rect, each a staging allocation inside
+//! wgpu-native, plus every piece of state re-set per draw: an idle zigame
+//! editor frame made 257 writes for 154 draws, and now makes 3
+//! (`queue_writes`, `draw_calls`, for a host to hold a frame to).
+//!
+//! ⚠ A host that draws through this renderer outside `Window.begin`/`end`
+//! must call `end` itself before it submits, or the frame's bytes never reach
+//! the GPU.
 
 const std = @import("std");
 const dvui = @import("dvui");
@@ -23,6 +42,28 @@ const wgpu = @import("wgpu");
 pub const kind: dvui.enums.RenderBackend = .wgpu;
 
 const Vertex = dvui.Vertex;
+
+// A draw's vertices are addressed by `base_vertex` into one bound buffer, so
+// every staged offset has to be a whole number of vertices; staging pads to four
+// bytes, which is a no-op exactly when a vertex is a multiple of four.
+comptime {
+    std.debug.assert(@sizeOf(Vertex) % 4 == 0);
+}
+
+/// One scissor rect, as a pass is told it.
+const Scissor = struct { x: u32, y: u32, w: u32, h: u32 };
+
+/// What the current render pass has bound. Null means "not set in this pass".
+const Bound = struct {
+    pipeline: ?wgpu.WGPURenderPipeline = null,
+    /// The dynamic offset group 0 was bound with.
+    uniform_offset: ?u32 = null,
+    texture_group: ?wgpu.WGPUBindGroup = null,
+    scissor: ?Scissor = null,
+    /// Vertex slot 0: the triangle buffer or the SDF instance buffer.
+    slot0: ?wgpu.WGPUBuffer = null,
+    index: ?wgpu.WGPUBuffer = null,
+};
 
 /// GPU instance data for SDF rounded rects (72 bytes per instance).
 /// Must match the vertex attribute layout in the SDF pipeline.
@@ -69,11 +110,29 @@ index_buf_size: u64,
 // SDF instance buffer
 sdf_instance_buffer: wgpu.WGPUBuffer,
 sdf_instance_buf_size: u64,
-sdf_instance_byte_offset: u64 = 0,
 
-// Per-frame sub-allocation offsets (bytes)
-vtx_byte_offset: u64 = 0,
-idx_byte_offset: u64 = 0,
+// This frame's vertices, indices and SDF instances, staged on the CPU and
+// written with ONE queue write each in `end` (`dvui.render.StagedUploads`). A
+// draw is recorded against the offset its bytes will land at. Writing each draw
+// as it arrived cost a staging allocation inside wgpu-native per write — two per
+// text run, one per rounded rect, a fifth of an idle editor frame.
+vtx_stage: dvui.render.StagedUploads = .{},
+idx_stage: dvui.render.StagedUploads = .{},
+sdf_stage: dvui.render.StagedUploads = .{},
+
+// What the current pass already has bound, so a draw sets only what differs
+// (`dvui.render.passNeeds`). Every new pass starts from nothing: `newPass`.
+bound: Bound = .{},
+
+/// Queue writes this frame, since `begin` — the staged uploads, a projection, a
+/// texture upload. A COUNT, for a host to hold a frame to: it used to grow with
+/// every draw, and now a steady frame makes a handful however much it draws.
+queue_writes: u32 = 0,
+/// Draw calls recorded this frame, since `begin`.
+draw_calls: u32 = 0,
+/// The window projection slot 0 holds, so an unchanged viewport is not
+/// rewritten every frame.
+slot0_size: ?[2]f32 = null,
 
 // Frame state
 current_pass: ?wgpu.WGPURenderPassEncoder = null,
@@ -500,6 +559,9 @@ pub fn deinit(self: *@This()) void {
     wgpu.wgpuBufferRelease(self.sdf_instance_buffer);
     wgpu.wgpuRenderPipelineRelease(self.pipeline);
     wgpu.wgpuRenderPipelineRelease(self.sdf_pipeline);
+    self.vtx_stage.deinit(self.allocator);
+    self.idx_stage.deinit(self.allocator);
+    self.sdf_stage.deinit(self.allocator);
 
     var it = self.bind_groups.valueIterator();
     while (it.next()) |bg| wgpu.wgpuBindGroupRelease(bg.*);
@@ -519,6 +581,13 @@ pub fn deinit(self: *@This()) void {
 
 pub fn setRenderPass(self: *@This(), pass: wgpu.WGPURenderPassEncoder) void {
     self.current_pass = pass;
+    self.newPass();
+}
+
+/// A pass begins with nothing bound. Called for every pass this backend is
+/// handed or opens, so no draw trusts state from a pass that has ended.
+fn newPass(self: *@This()) void {
+    self.bound = .{};
 }
 
 pub fn setCommandEncoder(self: *@This(), encoder: wgpu.WGPUCommandEncoder, surface_view: wgpu.WGPUTextureView) void {
@@ -536,8 +605,13 @@ pub fn setViewportSize(self: *@This(), size: struct { width: f32, height: f32 })
 
     // Slot 0 holds the window's projection for the life of the window, so the
     // main pass never has to compete for a slot with the frame's target
-    // switches.
-    self.writeProjectionAt(0, size.width, size.height);
+    // switches — and nothing else writes it, so an unchanged viewport is not
+    // written again.
+    const wanted: [2]f32 = .{ size.width, size.height };
+    if (self.slot0_size == null or !std.meta.eql(self.slot0_size.?, wanted)) {
+        self.writeProjectionAt(0, size.width, size.height);
+        self.slot0_size = wanted;
+    }
     self.uniform_slot = 0;
 }
 
@@ -552,6 +626,7 @@ fn writeProjectionAt(self: *@This(), slot: u32, w: f32, h: f32) void {
     };
     const offset: u64 = @as(u64, slot) * uniform_slot_stride;
     wgpu.wgpuQueueWriteBuffer(self.queue, self.uniform_buffer, offset, &projection, @sizeOf(@TypeOf(projection)));
+    self.queue_writes += 1;
 }
 
 /// Take the next free slot in this frame's ring and write `w` x `h`'s
@@ -567,85 +642,126 @@ fn writeProjection(self: *@This(), w: f32, h: f32) void {
 }
 
 pub fn begin(self: *@This(), _: std.mem.Allocator) !void {
-    self.vtx_byte_offset = 0;
-    self.idx_byte_offset = 0;
-    self.sdf_instance_byte_offset = 0;
+    // Whatever a frame that never reached `end` staged is dropped with it.
+    self.vtx_stage.restart(0);
+    self.idx_stage.restart(0);
+    self.sdf_stage.restart(0);
+    self.queue_writes = 0;
+    self.draw_calls = 0;
     // Slot 0 stays the window's; the ring starts after it.
     self.uniform_slots_used = 1;
     self.uniform_overflow_logged = false;
 }
 
-pub fn end(_: *@This()) !void {}
+/// The frame's staged uploads go to the GPU here: one queue write per buffer.
+/// dvui calls this from `Window.end`, before the host ends its pass and submits
+/// — and a queue write lands before any command buffer submitted after it, so
+/// every draw recorded this frame reads its own bytes.
+pub fn end(self: *@This()) !void {
+    self.flushStage(&self.vtx_stage, self.vertex_buffer);
+    self.flushStage(&self.idx_stage, self.index_buffer);
+    self.flushStage(&self.sdf_stage, self.sdf_instance_buffer);
+}
+
+/// Write what `stage` holds into `buffer` at its base, and keep staging from
+/// where it stopped.
+fn flushStage(self: *@This(), stage: *dvui.render.StagedUploads, buffer: wgpu.WGPUBuffer) void {
+    const bytes = stage.bytes.items;
+    if (bytes.len > 0) {
+        wgpu.wgpuQueueWriteBuffer(self.queue, buffer, stage.base, bytes.ptr, bytes.len);
+        self.queue_writes += 1;
+    }
+    stage.restart(stage.next());
+}
+
+/// Make room for `extra` more staged bytes in `buffer`. A buffer that is too
+/// small is replaced by one at least twice its size: what is already staged is
+/// written into the OLD buffer first (the draws recorded so far are bound to
+/// it), and staging goes on at the same offset in the new one, so the frame's
+/// offsets never move. A steady UI settles on buffers that hold a whole frame.
+fn ensureRoom(
+    self: *@This(),
+    stage: *dvui.render.StagedUploads,
+    buffer: *wgpu.WGPUBuffer,
+    size: *u64,
+    extra: u64,
+    usage: wgpu.WGPUBufferUsage,
+    label: []const u8,
+) !void {
+    const needed = stage.next() + extra;
+    if (needed <= size.*) return;
+    self.flushStage(stage, buffer.*);
+    wgpu.wgpuBufferRelease(buffer.*);
+    // ⚠ By clearing the binding, never by comparing handles: wgpu-native can
+    // hand the new buffer the address the released one had, and a pass that
+    // "already has it" would go on drawing from the old, smaller buffer.
+    self.bound.slot0 = null;
+    self.bound.index = null;
+    size.* = @max(needed, size.* * 2);
+    buffer.* = wgpu.wgpuDeviceCreateBuffer(self.device, &wgpu.WGPUBufferDescriptor{
+        .nextInChain = null,
+        .label = .{ .data = label.ptr, .length = label.len },
+        .usage = usage | wgpu.WGPUBufferUsage_CopyDst,
+        .size = size.*,
+        .mappedAtCreation = @intFromBool(false),
+    }) orelse return error.BackendError;
+}
+
+/// Bind the pipeline, the window's or the target's projection and the scissor,
+/// each only when the pass does not already have it.
+fn bindCommon(self: *@This(), pass: wgpu.WGPURenderPassEncoder, pipeline: wgpu.WGPURenderPipeline, clipr: ?dvui.Rect.Physical) void {
+    if (dvui.render.passNeeds(wgpu.WGPURenderPipeline, &self.bound.pipeline, pipeline)) {
+        wgpu.wgpuRenderPassEncoderSetPipeline(pass, pipeline);
+    }
+    const uniform_offset: u32 = @intCast(@as(u64, self.uniform_slot) * uniform_slot_stride);
+    if (dvui.render.passNeeds(u32, &self.bound.uniform_offset, uniform_offset)) {
+        const uniform_offsets = [_]u32{uniform_offset};
+        wgpu.wgpuRenderPassEncoderSetBindGroup(pass, 0, self.uniform_bind_group, 1, &uniform_offsets);
+    }
+    // Scissor rect, clamped to whatever this pass draws into.
+    const clamped = dvui.render.clampScissor(clipr, self.pass_width, self.pass_height);
+    const scissor: Scissor = .{ .x = clamped.x, .y = clamped.y, .w = clamped.w, .h = clamped.h };
+    if (dvui.render.passNeeds(Scissor, &self.bound.scissor, scissor)) {
+        wgpu.wgpuRenderPassEncoderSetScissorRect(pass, scissor.x, scissor.y, scissor.w, scissor.h);
+    }
+}
 
 pub fn drawClippedTriangles(self: *@This(), _: dvui.Size.Physical, texture: ?dvui.Texture, vtx: []const Vertex, idx: []const Vertex.Index, clipr: ?dvui.Rect.Physical) !void {
     const pass = self.current_pass orelse return;
 
     if (vtx.len == 0 or idx.len == 0) return;
 
-    const vtx_bytes: u64 = @intCast(vtx.len * @sizeOf(Vertex));
-    const idx_bytes: u64 = @intCast(idx.len * @sizeOf(Vertex.Index));
+    const vtx_bytes = std.mem.sliceAsBytes(vtx);
+    const idx_bytes = std.mem.sliceAsBytes(idx);
+    try self.ensureRoom(&self.vtx_stage, &self.vertex_buffer, &self.vertex_buf_size, std.mem.alignForward(u64, vtx_bytes.len, 4), wgpu.WGPUBufferUsage_Vertex, "dvui_vtx");
+    try self.ensureRoom(&self.idx_stage, &self.index_buffer, &self.index_buf_size, std.mem.alignForward(u64, idx_bytes.len, 4), wgpu.WGPUBufferUsage_Index, "dvui_idx");
+    const vtx_offset = try self.vtx_stage.push(self.allocator, vtx_bytes);
+    const idx_offset = try self.idx_stage.push(self.allocator, idx_bytes);
 
-    // wgpu requires COPY_BUFFER_ALIGNMENT (4 bytes) for writeBuffer size and offset
-    const copy_align: u64 = 4;
-    const vtx_bytes_aligned = (vtx_bytes + copy_align - 1) & ~(copy_align - 1);
-    const idx_bytes_aligned = (idx_bytes + copy_align - 1) & ~(copy_align - 1);
-
-    // Grow buffers if accumulated data exceeds capacity
-    const needed_vtx = self.vtx_byte_offset + vtx_bytes_aligned;
-    const needed_idx = self.idx_byte_offset + idx_bytes_aligned;
-
-    if (needed_vtx > self.vertex_buf_size) {
-        wgpu.wgpuBufferRelease(self.vertex_buffer);
-        self.vertex_buf_size = @max(needed_vtx, self.vertex_buf_size * 2);
-        self.vertex_buffer = wgpu.wgpuDeviceCreateBuffer(self.device, &wgpu.WGPUBufferDescriptor{
-            .nextInChain = null,
-            .label = .{ .data = "dvui_vtx", .length = 8 },
-            .usage = wgpu.WGPUBufferUsage_Vertex | wgpu.WGPUBufferUsage_CopyDst,
-            .size = self.vertex_buf_size,
-            .mappedAtCreation = @intFromBool(false),
-        }) orelse return error.BackendError;
-    }
-    if (needed_idx > self.index_buf_size) {
-        wgpu.wgpuBufferRelease(self.index_buffer);
-        self.index_buf_size = @max(needed_idx, self.index_buf_size * 2);
-        self.index_buffer = wgpu.wgpuDeviceCreateBuffer(self.device, &wgpu.WGPUBufferDescriptor{
-            .nextInChain = null,
-            .label = .{ .data = "dvui_idx", .length = 8 },
-            .usage = wgpu.WGPUBufferUsage_Index | wgpu.WGPUBufferUsage_CopyDst,
-            .size = self.index_buf_size,
-            .mappedAtCreation = @intFromBool(false),
-        }) orelse return error.BackendError;
-    }
-
-    // Upload data at current offset (sub-allocated)
-    wgpu.wgpuQueueWriteBuffer(self.queue, self.vertex_buffer, self.vtx_byte_offset, vtx.ptr, vtx_bytes_aligned);
-    wgpu.wgpuQueueWriteBuffer(self.queue, self.index_buffer, self.idx_byte_offset, idx.ptr, idx_bytes_aligned);
-
-    // Set pipeline and bind groups
-    wgpu.wgpuRenderPassEncoderSetPipeline(pass, self.pipeline);
-    const uniform_offsets = [_]u32{@intCast(@as(u64, self.uniform_slot) * uniform_slot_stride)};
-    wgpu.wgpuRenderPassEncoderSetBindGroup(pass, 0, self.uniform_bind_group, 1, &uniform_offsets);
+    self.bindCommon(pass, self.pipeline, clipr);
 
     // Texture bind group
     const tex_bg = if (texture) |t| blk: {
         const key = @intFromPtr(t.ptr);
         break :blk self.bind_groups.get(key) orelse self.white_bind_group;
     } else self.white_bind_group;
-    wgpu.wgpuRenderPassEncoderSetBindGroup(pass, 1, tex_bg, 0, null);
+    if (dvui.render.passNeeds(wgpu.WGPUBindGroup, &self.bound.texture_group, tex_bg)) {
+        wgpu.wgpuRenderPassEncoderSetBindGroup(pass, 1, tex_bg, 0, null);
+    }
 
-    // Scissor rect, clamped to whatever this pass draws into.
-    const scissor = dvui.render.clampScissor(clipr, self.pass_width, self.pass_height);
-    wgpu.wgpuRenderPassEncoderSetScissorRect(pass, scissor.x, scissor.y, scissor.w, scissor.h);
-
-    // Bind this batch's slice of the buffer and draw
-    const index_format = if (@sizeOf(Vertex.Index) == 2) wgpu.WGPUIndexFormat_Uint16 else wgpu.WGPUIndexFormat_Uint32;
-    wgpu.wgpuRenderPassEncoderSetVertexBuffer(pass, 0, self.vertex_buffer, self.vtx_byte_offset, vtx_bytes_aligned);
-    wgpu.wgpuRenderPassEncoderSetIndexBuffer(pass, self.index_buffer, index_format, self.idx_byte_offset, idx_bytes_aligned);
-    wgpu.wgpuRenderPassEncoderDrawIndexed(pass, @intCast(idx.len), 1, 0, 0, 0);
-
-    // Advance offsets for next batch
-    self.vtx_byte_offset += vtx_bytes_aligned;
-    self.idx_byte_offset += idx_bytes_aligned;
+    // The WHOLE buffers stay bound for the pass; each draw addresses its own
+    // slice with a first index and a base vertex.
+    if (dvui.render.passNeeds(wgpu.WGPUBuffer, &self.bound.slot0, self.vertex_buffer)) {
+        wgpu.wgpuRenderPassEncoderSetVertexBuffer(pass, 0, self.vertex_buffer, 0, self.vertex_buf_size);
+    }
+    if (dvui.render.passNeeds(wgpu.WGPUBuffer, &self.bound.index, self.index_buffer)) {
+        const index_format = if (@sizeOf(Vertex.Index) == 2) wgpu.WGPUIndexFormat_Uint16 else wgpu.WGPUIndexFormat_Uint32;
+        wgpu.wgpuRenderPassEncoderSetIndexBuffer(pass, self.index_buffer, index_format, 0, self.index_buf_size);
+    }
+    const first_index: u32 = @intCast(idx_offset / @sizeOf(Vertex.Index));
+    const base_vertex: i32 = @intCast(vtx_offset / @sizeOf(Vertex));
+    wgpu.wgpuRenderPassEncoderDrawIndexed(pass, @intCast(idx.len), 1, first_index, base_vertex, 0);
+    self.draw_calls += 1;
 }
 
 pub fn drawSdfRect(self: *@This(), sdf_rect: dvui.SdfRect, clipr: ?dvui.Rect.Physical) !void {
@@ -674,42 +790,20 @@ pub fn drawSdfRect(self: *@This(), sdf_rect: dvui.SdfRect, clipr: ?dvui.Rect.Phy
         .border_softness = .{ sdf_rect.border_width, sdf_rect.softness },
     };
 
-    const inst_bytes: u64 = @sizeOf(SdfInstanceData);
-    const copy_align: u64 = 4;
-    const inst_bytes_aligned = (inst_bytes + copy_align - 1) & ~(copy_align - 1);
+    // 72 bytes: a whole number of instances at every staged offset.
+    comptime std.debug.assert(@sizeOf(SdfInstanceData) % 4 == 0);
+    try self.ensureRoom(&self.sdf_stage, &self.sdf_instance_buffer, &self.sdf_instance_buf_size, @sizeOf(SdfInstanceData), wgpu.WGPUBufferUsage_Vertex, "dvui_sdf_inst");
+    const offset = try self.sdf_stage.push(self.allocator, std.mem.asBytes(&instance));
 
-    // Grow buffer if needed
-    const needed = self.sdf_instance_byte_offset + inst_bytes_aligned;
-    if (needed > self.sdf_instance_buf_size) {
-        wgpu.wgpuBufferRelease(self.sdf_instance_buffer);
-        self.sdf_instance_buf_size = @max(needed, self.sdf_instance_buf_size * 2);
-        self.sdf_instance_buffer = wgpu.wgpuDeviceCreateBuffer(self.device, &wgpu.WGPUBufferDescriptor{
-            .nextInChain = null,
-            .label = .{ .data = "dvui_sdf_inst", .length = 13 },
-            .usage = wgpu.WGPUBufferUsage_Vertex | wgpu.WGPUBufferUsage_CopyDst,
-            .size = self.sdf_instance_buf_size,
-            .mappedAtCreation = @intFromBool(false),
-        }) orelse return error.BackendError;
+    self.bindCommon(pass, self.sdf_pipeline, clipr);
+
+    // The whole instance buffer stays bound; the draw picks its instance.
+    if (dvui.render.passNeeds(wgpu.WGPUBuffer, &self.bound.slot0, self.sdf_instance_buffer)) {
+        wgpu.wgpuRenderPassEncoderSetVertexBuffer(pass, 0, self.sdf_instance_buffer, 0, self.sdf_instance_buf_size);
     }
-
-    // Upload instance data
-    wgpu.wgpuQueueWriteBuffer(self.queue, self.sdf_instance_buffer, self.sdf_instance_byte_offset, @as([*]const u8, @ptrCast(&instance)), inst_bytes_aligned);
-
-    // Set SDF pipeline
-    wgpu.wgpuRenderPassEncoderSetPipeline(pass, self.sdf_pipeline);
-    const uniform_offsets = [_]u32{@intCast(@as(u64, self.uniform_slot) * uniform_slot_stride)};
-    wgpu.wgpuRenderPassEncoderSetBindGroup(pass, 0, self.uniform_bind_group, 1, &uniform_offsets);
-
-    // Scissor rect, clamped to whatever this pass draws into.
-    const scissor = dvui.render.clampScissor(clipr, self.pass_width, self.pass_height);
-    wgpu.wgpuRenderPassEncoderSetScissorRect(pass, scissor.x, scissor.y, scissor.w, scissor.h);
-
-    // Bind instance buffer and draw 6 vertices (quad) for 1 instance
-    wgpu.wgpuRenderPassEncoderSetVertexBuffer(pass, 0, self.sdf_instance_buffer, self.sdf_instance_byte_offset, inst_bytes_aligned);
-    wgpu.wgpuRenderPassEncoderDraw(pass, 6, 1, 0, 0);
-
-    // Advance offset
-    self.sdf_instance_byte_offset += inst_bytes_aligned;
+    // 6 vertices (a quad) for the one instance.
+    wgpu.wgpuRenderPassEncoderDraw(pass, 6, 1, 0, @intCast(offset / @sizeOf(SdfInstanceData)));
+    self.draw_calls += 1;
 }
 
 pub fn textureCreate(self: *@This(), pixels: [*]const u8, options: dvui.Texture.CreateOptions) !dvui.Texture {
@@ -741,6 +835,7 @@ pub fn textureCreate(self: *@This(), pixels: [*]const u8, options: dvui.Texture.
         .bytesPerRow = width * 4,
         .rowsPerImage = height,
     }, &.{ .width = width, .height = height, .depthOrArrayLayers = 1 });
+    self.queue_writes += 1;
 
     const view = wgpu.wgpuTextureCreateView(tex, null) orelse return error.TextureCreate;
 
@@ -788,6 +883,7 @@ pub fn textureUpdate(self: *@This(), texture: dvui.Texture, pixels: [*]const u8)
         .bytesPerRow = texture.width * 4,
         .rowsPerImage = texture.height,
     }, &.{ .width = texture.width, .height = texture.height, .depthOrArrayLayers = 1 });
+    self.queue_writes += 1;
 }
 
 pub fn textureDestroy(self: *@This(), texture: dvui.Texture) void {
@@ -1131,6 +1227,7 @@ pub fn renderTarget(self: *@This(), maybe_target: ?dvui.TextureTarget) void {
         }) orelse return;
 
         self.current_pass = new_pass;
+        self.newPass();
         self.current_target_view = render_view;
 
         // The attachment is the texture now, so the scissor is measured against
@@ -1171,6 +1268,7 @@ fn restoreMainPass(self: *@This()) void {
     }) orelse return;
 
     self.current_pass = new_pass;
+    self.newPass();
     self.current_target_view = null;
     self.pass_width = self.viewport_width;
     self.pass_height = self.viewport_height;

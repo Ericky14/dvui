@@ -904,6 +904,108 @@ test "a scissor is clamped to the attachment, not to the window" {
     try testing.expectEqual(@as(u32, 0), empty.w);
 }
 
+/// **A frame's uploads to one GPU buffer, staged on the CPU and written once.**
+///
+/// A GPU backend that writes every draw's vertices the moment the draw arrives
+/// pays the driver's per-write cost hundreds of times a frame: on wgpu-native
+/// each `wgpuQueueWriteBuffer` takes a staging allocation of its own, and an
+/// idle editor frame made two of them per text run and one per rounded rect —
+/// a fifth of the frame (measured 2026-09-26). The draw only needs to know
+/// WHERE its bytes will be; the bytes themselves can arrive in one write before
+/// the frame is submitted, because a queue write lands before any command
+/// buffer submitted after it.
+///
+/// `push` appends and answers that offset; `base + bytes.len` is always the next
+/// one, so a caller never tracks offsets twice. Every push is padded to four
+/// bytes (`COPY_BUFFER_ALIGNMENT`), which keeps each draw's offset — and the
+/// write — on an aligned boundary.
+pub const StagedUploads = struct {
+    /// The staged bytes, in buffer order.
+    bytes: std.ArrayListUnmanaged(u8) = .empty,
+    /// Where in the GPU buffer `bytes[0]` goes.
+    base: u64 = 0,
+
+    /// The GPU offset the next push lands at.
+    pub fn next(self: *const StagedUploads) u64 {
+        return self.base + self.bytes.items.len;
+    }
+
+    /// Stage `data`; answers the GPU offset it lands at.
+    pub fn push(self: *StagedUploads, gpa: std.mem.Allocator, data: []const u8) std.mem.Allocator.Error!u64 {
+        const offset = self.next();
+        const padded = std.mem.alignForward(usize, data.len, 4);
+        try self.bytes.ensureUnusedCapacity(gpa, padded);
+        self.bytes.appendSliceAssumeCapacity(data);
+        self.bytes.appendNTimesAssumeCapacity(0, padded - data.len);
+        return offset;
+    }
+
+    /// Start again at GPU offset `base` with nothing staged — after a flush, a
+    /// new frame, or a new buffer. Keeps the capacity, so a steady frame
+    /// allocates nothing.
+    pub fn restart(self: *StagedUploads, base: u64) void {
+        self.bytes.clearRetainingCapacity();
+        self.base = base;
+    }
+
+    pub fn deinit(self: *StagedUploads, gpa: std.mem.Allocator) void {
+        self.bytes.deinit(gpa);
+        self.* = .{};
+    }
+};
+
+/// **Whether a render pass has to be told `value`.** True — and `bound`
+/// remembers it — when it differs from what the pass already has; false when
+/// setting it again would change nothing. A backend keeps one `?T` per piece of
+/// pass state (pipeline, bind group, scissor, buffers) and resets them all to
+/// null whenever a new pass begins, because a new pass starts with nothing
+/// bound.
+pub fn passNeeds(comptime T: type, bound: *?T, value: T) bool {
+    if (bound.*) |current| {
+        if (std.meta.eql(current, value)) return false;
+    }
+    bound.* = value;
+    return true;
+}
+
+test "staged uploads land at the offsets the draws were told, four-byte aligned" {
+    const testing = std.testing;
+    var stage: StagedUploads = .{};
+    defer stage.deinit(testing.allocator);
+
+    // Six bytes of u16 indices land at 0 and are padded to eight, so the next
+    // draw's offset stays aligned for the write.
+    try testing.expectEqual(@as(u64, 0), try stage.push(testing.allocator, &.{ 1, 0, 2, 0, 3, 0 }));
+    try testing.expectEqual(@as(u64, 8), try stage.push(testing.allocator, &.{ 9, 9, 9, 9 }));
+    try testing.expectEqual(@as(u64, 12), stage.next());
+    try testing.expectEqualSlices(u8, &.{ 1, 0, 2, 0, 3, 0, 0, 0, 9, 9, 9, 9 }, stage.bytes.items);
+
+    // After a flush into a buffer that keeps growing mid-frame, the offsets go
+    // on from where the frame is, not from zero.
+    stage.restart(12);
+    try testing.expectEqual(@as(u64, 12), try stage.push(testing.allocator, &.{ 7, 7, 7, 7 }));
+    try testing.expectEqual(@as(usize, 4), stage.bytes.items.len);
+
+    // A new frame starts at zero with the capacity kept.
+    const capacity = stage.bytes.capacity;
+    stage.restart(0);
+    try testing.expectEqual(@as(u64, 0), stage.next());
+    try testing.expectEqual(capacity, stage.bytes.capacity);
+}
+
+test "a pass is told a piece of state once, until it changes or the pass does" {
+    const testing = std.testing;
+    const Scissor = struct { x: u32, y: u32, w: u32, h: u32 };
+    var bound: ?Scissor = null;
+    const whole: Scissor = .{ .x = 0, .y = 0, .w = 100, .h = 50 };
+    try testing.expect(passNeeds(Scissor, &bound, whole));
+    try testing.expect(!passNeeds(Scissor, &bound, whole));
+    try testing.expect(passNeeds(Scissor, &bound, .{ .x = 0, .y = 0, .w = 10, .h = 50 }));
+    // A new pass has nothing bound: the same value has to be set again.
+    bound = null;
+    try testing.expect(passNeeds(Scissor, &bound, whole));
+}
+
 test "a per-frame ring hands out one slot at a time and reports exhaustion" {
     const testing = @import("std").testing;
     var used: u32 = 1;
