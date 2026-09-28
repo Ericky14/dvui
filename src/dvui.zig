@@ -2058,6 +2058,12 @@ pub const TabIndex = struct {
     tab_index_group: Id,
     tabIndex: u16,
 
+    // The clip in effect when the widget registered: the part of `rect` that
+    // was visible (a scroll area's viewport, say). Something drawn for the
+    // stop after the frame's widgets (a focus ring) clips to this, so a stop
+    // scrolled out of its container draws nothing over its neighbours.
+    clip: ?Rect.Physical = null,
+
     // If true, prevents tabbing to this entry.  This is used to be able to
     // look up a widget inside a focus group so we know where to start, but
     // don't want to be able to tab inside a focus group.
@@ -2097,6 +2103,7 @@ pub fn tabIndexSetEx(widget_id: Id, tab_index: ?u16, rect: ?Rect.Physical, tab_g
         .tab_index_group = TabIndexGroup.current,
         .tabIndex = (tab_index orelse math.maxInt(u16)),
         .tab_group = tab_group,
+        .clip = clipGet(),
     };
 
     if (cw.subwindows.get(cw.subwindows.current_id)) |sw| {
