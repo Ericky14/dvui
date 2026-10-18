@@ -124,8 +124,13 @@ pub fn drawClippedTriangles(self: *TestingBackend, texture: ?dvui.Texture, vtx: 
     var tri: usize = 0;
     while (tri + 3 <= idx.len) : (tri += 3) {
         const va = vtx[idx[tri]];
-        const vb = vtx[idx[tri + 1]];
-        const vc = vtx[idx[tri + 2]];
+        var vb = vtx[idx[tri + 1]];
+        var vc = vtx[idx[tri + 2]];
+        // One winding for every triangle, so the ownership rule below
+        // gives an edge two triangles share to exactly one of them.
+        if ((vb.pos.x - va.pos.x) * (vc.pos.y - va.pos.y) - (vb.pos.y - va.pos.y) * (vc.pos.x - va.pos.x) < 0) {
+            std.mem.swap(dvui.Vertex, &vb, &vc);
+        }
 
         const ax = va.pos.x;
         const ay = va.pos.y;
@@ -159,6 +164,13 @@ pub fn drawClippedTriangles(self: *TestingBackend, texture: ?dvui.Texture, vtx: 
                 const w1 = ((ax - cx) * (sy - cy) - (ay - cy) * (sx - cx)) * inv_area;
                 const w2 = ((bx - ax) * (sy - ay) - (by - ay) * (sx - ax)) * inv_area;
                 if (w0 < 0 or w1 < 0 or w2 < 0) continue;
+                // A pixel centre exactly on an edge belongs to one of the
+                // two triangles that share the edge, never both (a GPU's
+                // fill rule): drawn by both, a translucent mesh's every
+                // inner edge was blended twice.
+                if ((w0 == 0 and !ownsEdge(bx, by, cx, cy)) or
+                    (w1 == 0 and !ownsEdge(cx, cy, ax, ay)) or
+                    (w2 == 0 and !ownsEdge(ax, ay, bx, by))) continue;
 
                 // Interpolated premultiplied-alpha color.
                 var cr = w0 * toF32(va.col.r) + w1 * toF32(vb.col.r) + w2 * toF32(vc.col.r);
@@ -192,6 +204,14 @@ pub fn drawClippedTriangles(self: *TestingBackend, texture: ?dvui.Texture, vtx: 
             }
         }
     }
+}
+
+/// Whether a consistently wound triangle owns its edge from (`from_x`,
+/// `from_y`) to (`to_x`, `to_y`): the neighbour sharing it runs it the other
+/// way, so exactly one of the two does.
+fn ownsEdge(from_x: f32, from_y: f32, to_x: f32, to_y: f32) bool {
+    const dy = to_y - from_y;
+    return dy > 0 or (dy == 0 and to_x < from_x);
 }
 
 fn toF32(value: u8) f32 {
@@ -402,3 +422,38 @@ test "capture text entry" {
 
 pub const dvui = @import("dvui");
 pub const std = @import("std");
+
+test "two triangles sharing an edge blend every pixel on it once" {
+    var t = try dvui.testing.init(.{ .window_size = .{ .w = 40, .h = 40 } });
+    defer t.deinit();
+
+    // a half-transparent square on whole pixels, as two triangles split
+    // along its diagonal: the centres of the pixels on the diagonal lie
+    // exactly on the shared edge
+    const rect: dvui.Rect.Physical = .{ .x = 0, .y = 0, .w = 16, .h = 16 };
+    var picture = dvui.Picture.start(rect) orelse return error.SkipZigTest;
+    const half: dvui.Color.PMA = .{ .r = 128, .g = 128, .b = 128, .a = 128 };
+    const corners = [_]dvui.Vertex{
+        .{ .pos = .{ .x = 2, .y = 2 }, .col = half },
+        .{ .pos = .{ .x = 14, .y = 2 }, .col = half },
+        .{ .pos = .{ .x = 14, .y = 14 }, .col = half },
+        .{ .pos = .{ .x = 2, .y = 14 }, .col = half },
+    };
+    for ([_][6]dvui.Vertex.Index{ .{ 0, 1, 2, 0, 2, 3 }, .{ 0, 2, 1, 0, 3, 2 } }) |indices| {
+        try dvui.renderTriangles(.{ .vertexes = @constCast(&corners), .indices = @constCast(&indices), .bounds = .{ .x = 2, .y = 2, .w = 12, .h = 12 } }, null);
+    }
+    picture.stop();
+    const cw = dvui.currentWindow();
+    const pixels = try dvui.textureReadTarget(cw.lifo(), picture.texture);
+    defer cw.lifo().free(pixels);
+    picture.deinit();
+
+    // drawn twice (once per winding), each pixel is 128 over 128
+    for (2..14) |row| {
+        for (2..14) |column| {
+            const alpha = pixels[row * 16 + column].a;
+            errdefer std.debug.print("pixel ({d}, {d}) has alpha {d}, two layers of 128 make 192\n", .{ column, row, alpha });
+            try std.testing.expectEqual(@as(u8, 192), alpha);
+        }
+    }
+}
