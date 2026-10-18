@@ -250,9 +250,19 @@ fn ceilToPixels(size: Size, scale: f32) Size {
     };
 }
 
+/// `length` rounded UP to whole physical pixels — except by what f32 itself
+/// adds. A box asks for the sum of its children in f32 logical pixels, and
+/// past a few thousand pixels a sum of whole-pixel sizes lands thousandths
+/// over the whole number it stands for: 25.142857, the f32 nearest 44 / 1.75,
+/// is a hair over it, and three hundred such rows came to 17,386.045 physical
+/// for 17,386. So the slack grows with the size: a thousandth of a pixel, or
+/// one part in 65,536 of the length (0.27 px at 17,386, six times that drift);
+/// what it can ever cut is that much of the far end.
 fn ceilToPixelsAxis(length: f32, scale: f32) f32 {
     if (length <= 0 or length >= dvui.max_float_safe) return length;
-    return @ceil(length * scale - 0.001) / scale;
+    const physical = length * scale;
+    const slack = @max(0.001, physical / 65536.0);
+    return @ceil(physical - slack) / scale;
 }
 
 pub fn visible(self: *const WidgetData) bool {
@@ -597,4 +607,48 @@ test "without snap_to_pixels the layout keeps its fractions" {
     _ = try dvui.testing.step(Local.frame);
     defer dvui.debug.clearCaptures(std.testing.allocator);
     try std.testing.expect(try testFractionalEdges(1.75) > 0);
+}
+
+test "a long column of whole-pixel rows asks for exactly their sum, never a pixel more" {
+    // Under `snap_to_pixels` each row asks for a whole number of physical
+    // pixels, so the column holding them should too: N rows of 44 physical
+    // px with 14 between them is 58 N - 14. But the column adds the rows up
+    // in f32 LOGICAL pixels (25.142857 each at 175 %), and past a few
+    // thousand pixels the sum lands a few thousandths over the whole number
+    // it stands for — more than `ceilToPixels`' 0.001 — and is rounded up a
+    // whole pixel. A chat transcript drawn whole and the same transcript
+    // with its off-screen rows folded into one spacer then disagreed by a
+    // pixel at the bottom of the scroll (zigame's transcript_window_tests).
+    const Local = struct {
+        var rows: usize = 0;
+        /// The column's height as it asked for it on the frame before.
+        var asked: f32 = 0;
+
+        fn frame() !dvui.App.Result {
+            var column = dvui.box(@src(), .{ .dir = .vertical, .gap = 8 }, .{});
+            for (0..rows) |index| {
+                var row = dvui.box(@src(), .{}, .{ .id_extra = index, .min_size_content = .{ .w = 10, .h = 44.0 / 1.75 } });
+                row.deinit();
+            }
+            const id = column.data().id;
+            column.deinit();
+            if (dvui.minSizeGet(id)) |size| asked = size.h;
+            return .ok;
+        }
+    };
+    var t = try dvui.testing.init(.{ .window_size = .{ .w = 300, .h = 240 } });
+    defer t.deinit();
+    t.window.content_scale = 1.75 / 2.0;
+    var worst: f32 = 0;
+    var count: usize = 300;
+    while (count < 420) : (count += 7) {
+        Local.rows = count;
+        try dvui.testing.settle(Local.frame);
+        _ = try dvui.testing.step(Local.frame);
+        const wanted: f32 = @floatFromInt(58 * count - 14);
+        const off = Local.asked * 1.75 - wanted;
+        if (@abs(off) > @abs(worst)) worst = off;
+    }
+    errdefer std.debug.print("a column of whole-pixel rows asked for {d} physical px more than their sum\n", .{worst});
+    try std.testing.expect(@abs(worst) < 0.01);
 }
