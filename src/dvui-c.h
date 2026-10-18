@@ -13,6 +13,7 @@
 #include "freetype/ftsizes.h"
 #include "freetype/ftstroke.h"
 #include "freetype/fttrigon.h"
+#include "freetype/tttables.h"
 #else
 #include "stb_truetype.h"
 #endif

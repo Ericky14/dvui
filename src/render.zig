@@ -318,11 +318,12 @@ pub fn renderText(opts: TextOptions) Backend.GenericError!void {
         // inside rendering, it doesn't affect text sizing.
         const halfspace = (codepoint == '\n' or codepoint == '\r');
         var gi = try fce.glyphInfoGetOrReplacement(cw.gpa, if (halfspace) ' ' else codepoint);
-        if (halfspace) gi.advance = @round(gi.advance * 0.5);
+        if (halfspace) gi.advance = gi.advance * 0.5;
 
         if (kerning and last_codepoint != 0 and i >= next_kern_byte) {
+            // never rounded: this must match Font.textSizeRaw
             const kk = fce.kern(last_codepoint, codepoint);
-            x += target_fraction * (if (cw.snap_to_pixels) @round(kk) else kk);
+            x += target_fraction * kk;
 
             if (opts.kern_in) |ki| {
                 if (next_kern_idx < ki.len) {
@@ -335,7 +336,7 @@ pub fn renderText(opts: TextOptions) Backend.GenericError!void {
         i += cplen;
         last_codepoint = codepoint;
 
-        const adv = if (cw.snap_to_pixels) @round(gi.advance) else gi.advance;
+        const adv = gi.advance;
         if (x + gi.leftBearing * target_fraction < start.x) {
             // Glyph extends left of the start, like the first letter being
             // "j", which has a negative left bearing.
@@ -349,7 +350,13 @@ pub fn renderText(opts: TextOptions) Backend.GenericError!void {
         }
 
         const nextx = x + adv * target_fraction;
-        const leftx = x + gi.leftBearing * target_fraction;
+        // Snapped, the pen keeps its fraction: the glyph's cell starts on the
+        // whole pixel below it and the atlas cell rasterised at the nearest
+        // quarter pixel carries the rest, so every glyph sits within an
+        // eighth of a pixel of where the outline's advances put it.
+        const pen_cell: Font.Cache.Entry.PenCell = if (cw.snap_to_pixels) Font.Cache.Entry.penCell(x) else .{ .whole = x, .phase = 0 };
+        const leftx = pen_cell.whole + gi.leftBearing * target_fraction;
+        const uv = gi.uvs[pen_cell.phase];
 
         if (sel) {
             bytes_seen += std.unicode.utf8CodepointSequenceLength(codepoint) catch unreachable;
@@ -385,7 +392,7 @@ pub fn renderText(opts: TextOptions) Backend.GenericError!void {
             v.pos.x = leftx;
             v.pos.y = start.y + (fce_ascent - gi.topBearing) * target_fraction;
             v.col = if (opts.gradient) |g| .fromColor(g.sample(gradient_bounds, v.pos).opacity(cw.alpha)) else col;
-            v.uv = gi.uv;
+            v.uv = uv;
             builder.appendVertex(v);
 
             if (opts.debug) {
@@ -397,20 +404,20 @@ pub fn renderText(opts: TextOptions) Backend.GenericError!void {
                 //log.debug("{d} pad {d} left {d} top {d} w {d} h {d} advance {d}", .{ bytes_seen, pad, gi.f2_leftBearing, gi.f2_topBearing, gi.f2_w, gi.f2_h, gi.f2_advance });
             }
 
-            v.pos.x = x + (gi.leftBearing + gi.w) * target_fraction;
-            max_x = v.pos.x;
-            v.uv[0] = gi.uv[0] + gi.w / atlas_size.w;
+            v.pos.x = leftx + gi.cell_w * target_fraction;
+            max_x = leftx + gi.w * target_fraction;
+            v.uv[0] = uv[0] + gi.cell_w / atlas_size.w;
             if (opts.gradient) |g| v.col = .fromColor(g.sample(gradient_bounds, v.pos).opacity(cw.alpha));
             builder.appendVertex(v);
 
             v.pos.y = start.y + (fce_ascent - gi.topBearing + gi.h) * target_fraction;
             sel_max_y = @max(sel_max_y, v.pos.y);
-            v.uv[1] = gi.uv[1] + gi.h / atlas_size.h;
+            v.uv[1] = uv[1] + gi.h / atlas_size.h;
             if (opts.gradient) |g| v.col = .fromColor(g.sample(gradient_bounds, v.pos).opacity(cw.alpha));
             builder.appendVertex(v);
 
             v.pos.x = leftx;
-            v.uv[0] = gi.uv[0];
+            v.uv[0] = uv[0];
             if (opts.gradient) |g| v.col = .fromColor(g.sample(gradient_bounds, v.pos).opacity(cw.alpha));
             builder.appendVertex(v);
 

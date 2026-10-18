@@ -6,6 +6,7 @@ const Rect = dvui.Rect;
 const Size = dvui.Size;
 const Texture = dvui.Texture;
 const Backend = dvui.Backend;
+const gpos_kern = @import("gpos_kern.zig");
 
 /// Font represents the parameters that dvui will try to satisfy when rendering
 /// text.  If a matching font is not found, dvui will log an error and use the
@@ -479,18 +480,62 @@ pub const Cache = struct {
         glyph_info: std.AutoHashMapUnmanaged(u32, GlyphInfo) = .empty,
         glyph_info_ascii: [ascii_size - ascii_start]GlyphInfo,
         texture_atlas_cache: ?Texture = null,
+        /// The pair kerning in the face's `GPOS` table (FreeType only; a face
+        /// with one kerns from it, never from its legacy `kern` table, as a
+        /// browser does). Borrows `gpos_table`.
+        gpos: if (impl == .FreeType) ?gpos_kern.Kern else void = if (impl == .FreeType) null else {},
+        /// The face's `GPOS` table, copied out of FreeType (gpa).
+        gpos_table: []u8 = &.{},
+        /// Font units to pixels at this entry's size (FreeType's x_scale).
+        unit_scale: f32 = 0,
 
         const ascii_size = 127;
         const ascii_start = 32;
 
+        /// Each glyph is rasterised at this many horizontal offsets (0, 1/4,
+        /// 1/2 and 3/4 of a pixel), so a pen that lands between pixels draws
+        /// the glyph where it is instead of rounding it to the nearest pixel:
+        /// the advances stay the outline's, and the spacing stays even.
+        pub const subpixel_phases = 4;
+
         const GlyphInfo = struct {
-            advance: f32, // horizontal distance to move the pen
+            advance: f32, // horizontal distance to move the pen (exact, not rounded)
             leftBearing: f32, // horizontal distance from pen to glyph pixels left edge (integer)
             topBearing: f32, // vertical distance from pen to glyph pixels top edge (integer)
-            w: f32, // width of bounding box (integer)
+            w: f32, // width of the ink's bounding box with the pen on a pixel edge (integer)
             h: f32, // height of bounding box (integer)
-            uv: @Vector(2, f32),
+            /// Width of the glyph's atlas cell (integer): `w` plus the column
+            /// the ink can move into at a 3/4 pixel offset.
+            cell_w: f32,
+            /// The glyph's index in the face (FreeType), for GPOS kerning.
+            index: u32 = 0,
+            /// Atlas coordinates of the cell for each subpixel phase.
+            uvs: [subpixel_phases]@Vector(2, f32),
         };
+
+        /// The FreeType load flags every glyph is measured and drawn with:
+        /// FT_LOAD_TARGET_LIGHT, the hinting FreeType recommends for gray
+        /// antialiasing with fractional advances. It fits a glyph to the
+        /// pixel grid vertically only (crisp baselines and x-heights) and
+        /// leaves its horizontal shape the outline's, as browsers draw text;
+        /// full hinting moved and widened stems to whole pixels, which read
+        /// as uneven spacing once advances stopped being rounded.
+        const load_flags: i32 = 1 << 16;
+        /// FT_LOAD_RENDER
+        const load_render: i32 = 1 << 2;
+
+        /// Where a glyph is drawn from: the whole pixel its cell starts on,
+        /// and which subpixel phase of the glyph's atlas cells to use.
+        pub const PenCell = struct { whole: f32, phase: usize };
+
+        /// Where pen position `x` (physical pixels) draws a glyph.
+        pub fn penCell(x: f32) PenCell {
+            const whole = @floor(x);
+            const phases: f32 = @floatFromInt(subpixel_phases);
+            const step = @round((x - whole) * phases);
+            if (step >= phases) return .{ .whole = whole + 1, .phase = 0 };
+            return .{ .whole = whole, .phase = @intFromFloat(@max(0, step)) };
+        }
 
         /// Load the underlying font at an integer size <= font.size (guaranteed to have a minimum pixel size of 1)
         pub fn init(gpa: std.mem.Allocator, ttf_bytes: []const u8, font: Font) Error!Entry {
@@ -511,10 +556,13 @@ pub const Cache = struct {
                 };
 
                 if (font.size_mode == .pixel) {
-                    // CSS/iced-compatible mode: use size directly as FT pixel size.
-                    const pixel_size = @as(u32, @intFromFloat(@max(min_pixel_size, @round(font.size))));
-                    FreeType.intToError(c.FT_Set_Pixel_Sizes(face, pixel_size, pixel_size)) catch |err| {
-                        dvui.log.warn("Font.Cache.Entry.init() freetype error {any} trying to FT_Set_Pixel_Sizes font {s}\n", .{ err, fname });
+                    // CSS/iced-compatible mode: the size is the em in pixels,
+                    // fractions kept (26.6 at 72 dpi, where a point is a
+                    // pixel): 13 logical pixels at 175 % is a 22.75 px em, as
+                    // a browser draws it, never 23.
+                    const char_size: c.FT_F26Dot6 = @intFromFloat(@round(@max(min_pixel_size, font.size) * 64));
+                    FreeType.intToError(c.FT_Set_Char_Size(face, 0, char_size, 72, 72)) catch |err| {
+                        dvui.log.warn("Font.Cache.Entry.init() freetype error {any} trying to FT_Set_Char_Size font {s}\n", .{ err, fname });
                         return Error.FontError;
                     };
 
@@ -633,6 +681,14 @@ pub const Cache = struct {
                 break :blk entry;
             };
 
+            if (impl == .FreeType) {
+                self.unit_scale = @as(f32, @floatFromInt(self.face.*.size.*.metrics.x_scale)) / 65536.0 / 64.0;
+                self.loadGpos(gpa) catch |err| {
+                    dvui.log.warn("Font.Cache.Entry.init() {any} reading the GPOS kerning of font {s}; it draws unkerned\n", .{ err, fname });
+                };
+            }
+            errdefer self.freeGpos(gpa);
+
             // Pre-generate the ascii glyphs
             //std.debug.print("char,codepoint,hx,w,hy,h,adv\n", .{});
             for (0..self.glyph_info_ascii.len) |i| {
@@ -645,10 +701,42 @@ pub const Cache = struct {
             return self;
         }
 
+        /// Read the face's `GPOS` pair kerning, if it has any.
+        fn loadGpos(self: *Entry, gpa: std.mem.Allocator) std.mem.Allocator.Error!void {
+            if (impl != .FreeType) return;
+            const tag: c.FT_ULong = 0x47504F53; // 'GPOS'
+            var length: c.FT_ULong = 0;
+            if (c.FT_Load_Sfnt_Table(self.face, tag, 0, null, &length) != 0 or length == 0) return;
+            const table = try gpa.alloc(u8, length);
+            if (c.FT_Load_Sfnt_Table(self.face, tag, 0, table.ptr, &length) != 0) {
+                gpa.free(table);
+                return;
+            }
+            const pairs = gpos_kern.Kern.init(gpa, table) catch |err| {
+                gpa.free(table);
+                return err;
+            };
+            if (pairs == null) {
+                gpa.free(table);
+                return;
+            }
+            self.gpos = pairs;
+            self.gpos_table = table;
+        }
+
+        fn freeGpos(self: *Entry, gpa: std.mem.Allocator) void {
+            if (impl != .FreeType) return;
+            if (self.gpos) |*pairs| pairs.deinit(gpa);
+            self.gpos = null;
+            gpa.free(self.gpos_table);
+            self.gpos_table = &.{};
+        }
+
         pub fn deinit(self: *Entry, gpa: std.mem.Allocator, backend: Backend) void {
             defer self.* = undefined;
             gpa.free(self.name);
             self.glyph_info.deinit(gpa);
+            self.freeGpos(gpa);
             if (impl == .FreeType) {
                 _ = c.FT_Done_Face(self.face);
             }
@@ -664,146 +752,179 @@ pub const Cache = struct {
 
         /// This needs to be called before rendering of glyphs as the uv coordinates
         /// of the glyphs will not be correct if the atlas needs to be generated.
+        ///
+        /// Every glyph is a strip of `subpixel_phases` cells side by side, the
+        /// glyph rasterised at each subpixel offset; strips are packed in
+        /// shelves about as wide as the atlas is tall.
         pub fn getTextureAtlas(self: *Entry, gpa: std.mem.Allocator, backend: Backend) Backend.TextureError!Texture {
             if (self.texture_atlas_cache) |tex| return tex;
 
-            // number of extra pixels to add on each side of each glyph
+            // number of extra pixels to add on each side of each cell
             const pad = 1;
+            const phases: f32 = @floatFromInt(subpixel_phases);
 
             const total = self.glyph_info_ascii.len + self.glyph_info.count();
-            const row_glyphs: u32 = @ceil(@as(f32, @sqrt(@as(f32, @floatFromInt(total)))));
 
+            var area: f32 = 0;
+            var widest: f32 = 0;
+            {
+                var it = self.glyph_info.iterator();
+                for (0..total) |i| {
+                    const gi = if (i < self.glyph_info_ascii.len) &self.glyph_info_ascii[i] else it.next().?.value_ptr;
+                    const strip_w = phases * (gi.cell_w + 2 * pad);
+                    area += strip_w * (gi.h + 2 * pad);
+                    widest = @max(widest, strip_w);
+                }
+            }
+            const shelf_w = @max(widest, @ceil(@sqrt(area)));
+
+            // where each strip goes (top left of its first cell's padding)
+            const places = try gpa.alloc(dvui.Point, total);
+            defer gpa.free(places);
             var s = Size{};
             {
-                var i: u32 = 0;
-                var row: Size = .{};
+                var x: f32 = 0;
+                var y: f32 = 0;
+                var shelf_h: f32 = 0;
                 var it = self.glyph_info.iterator();
-
-                while (i < total) {
-                    const gi, const codepoint = if (i < self.glyph_info_ascii.len) .{ &self.glyph_info_ascii[i], i + ascii_start } else blk: {
-                        const e = it.next().?;
-                        break :blk .{ e.value_ptr, e.key_ptr.* };
-                    };
-                    _ = codepoint;
-
-                    row.w += gi.w + 2 * pad;
-                    row.h = @max(row.h, gi.h + 2 * pad);
-
-                    i += 1;
-                    if (i % row_glyphs == 0) {
-                        s.w = @max(s.w, row.w);
-                        s.h += row.h;
-                        row = .{};
+                for (0..total) |i| {
+                    const gi = if (i < self.glyph_info_ascii.len) &self.glyph_info_ascii[i] else it.next().?.value_ptr;
+                    const strip_w = phases * (gi.cell_w + 2 * pad);
+                    if (x > 0 and x + strip_w > shelf_w) {
+                        y += shelf_h;
+                        x = 0;
+                        shelf_h = 0;
                     }
-                } else {
-                    s.w = @max(s.w, row.w);
-                    s.h += row.h;
+                    // also an extra padding around the whole texture
+                    places[i] = .{ .x = x + pad, .y = y + pad };
+                    x += strip_w;
+                    shelf_h = @max(shelf_h, gi.h + 2 * pad);
+                    s.w = @max(s.w, x);
                 }
-
-                s = s.ceil();
+                s.h = y + shelf_h;
             }
-
-            // also add an extra padding around whole texture
             s.w += 2 * pad;
             s.h += 2 * pad;
+            s = s.ceil();
 
-            var pixels = try gpa.alloc(dvui.Color.PMA, @as(usize, @trunc(s.w * s.h)));
+            const stride: usize = @intFromFloat(s.w);
+            const pixels = try gpa.alloc(dvui.Color.PMA, stride * @as(usize, @intFromFloat(s.h)));
             defer gpa.free(pixels);
             // set all pixels to zero alpha
             @memset(pixels, .transparent);
 
-            //const num_glyphs = fce.glyph_info.count();
-            //std.debug.print("font size {d} regen glyph atlas num {d} max size {}\n", .{ sized_font.size, num_glyphs, s });
-
-            var x: i32 = pad;
-            var y: i32 = pad;
             var it = self.glyph_info.iterator();
-            var row_height: u32 = 0;
-            var i: u32 = 0;
-            while (i < total) {
-                var gi, const codepoint = if (i < self.glyph_info_ascii.len) .{ &self.glyph_info_ascii[i], i + ascii_start } else blk: {
+            for (0..total) |i| {
+                const gi, const codepoint = if (i < self.glyph_info_ascii.len) .{ &self.glyph_info_ascii[i], @as(u32, @intCast(i + ascii_start)) } else blk: {
                     const e = it.next().?;
                     break :blk .{ e.value_ptr, e.key_ptr.* };
                 };
-
-                gi.uv[0] = @as(f32, @floatFromInt(x + pad)) / s.w;
-                gi.uv[1] = @as(f32, @floatFromInt(y + pad)) / s.h;
-
-                if (impl == .FreeType) blk: {
-                    FreeType.intToError(c.FT_Load_Char(self.face, codepoint, @as(i32, @bitCast(FreeType.LoadFlags{ .render = true })))) catch |err| {
-                        dvui.log.warn("renderText: freetype error {any} trying to FT_Load_Char codepoint {d}", .{ err, codepoint });
-                        break :blk; // will skip the failing glyph
+                for (0..subpixel_phases) |phase| {
+                    const cell: dvui.Point = .{
+                        .x = places[i].x + @as(f32, @floatFromInt(phase)) * (gi.cell_w + 2 * pad) + pad,
+                        .y = places[i].y + pad,
                     };
-
-                    // https://freetype.org/freetype2/docs/tutorial/step1.html#section-6
-                    if (self.face.*.glyph.*.format != c.FT_GLYPH_FORMAT_BITMAP) {
-                        FreeType.intToError(c.FT_Render_Glyph(self.face.*.glyph, c.FT_RENDER_MODE_NORMAL)) catch |err| {
-                            dvui.log.warn("renderText freetype error {any} trying to FT_Render_Glyph codepoint {d}", .{ err, codepoint });
-                            break :blk; // will skip the failing glyph
-                        };
-                    }
-
-                    const bitmap = self.face.*.glyph.*.bitmap;
-                    //std.debug.print("bitmap,{d},{d},{d}\n", .{codepoint, bitmap.width, bitmap.rows});
-                    row_height = @max(row_height, bitmap.rows);
-                    var row: i32 = 0;
-                    while (row < bitmap.rows) : (row += 1) {
-                        var col: i32 = 0;
-                        while (col < bitmap.width) : (col += 1) {
-                            const src = bitmap.buffer[@as(usize, @intCast(row * bitmap.pitch + col))];
-
-                            // because of the extra edge, offset by 1 row and 1 col
-                            const di = @as(usize, @intCast((y + row + pad) * @as(i32, @trunc(s.w)) + (x + col + pad)));
-
-                            // premultiplied white
-                            pixels[di] = .{ .r = src, .g = src, .b = src, .a = src };
-                        }
-                    }
-                } else {
-                    //var ow: c_int = undefined;
-                    //var oh: c_int = undefined;
-                    //const bm = c.stbtt_GetCodepointBitmap(&self.face, self.scaleFactor, self.scaleFactor, @as(c_int, @intCast(codepoint)), &ow, &oh, null, null);
-                    //std.debug.print("bitmap,{d},{d},{d}\n", .{codepoint, ow, oh});
-
-                    //c.stbtt_FreeBitmap(bm, null);
-
-                    const out_w: u32 = @trunc(gi.w);
-                    const out_h: u32 = @trunc(gi.h);
-                    row_height = @max(row_height, out_h);
-
-                    // single channel
-                    const bitmap = try gpa.alloc(u8, @as(usize, out_w * out_h));
-                    defer gpa.free(bitmap);
-
-                    //log.debug("makecodepointBitmap size x {d} y {d} w {d} h {d} out w {d} h {d}", .{ x, y, s.w, s.h, out_w, out_h });
-
-                    c.stbtt_MakeCodepointBitmapSubpixel(&self.face, bitmap.ptr, @as(c_int, @intCast(out_w)), @as(c_int, @intCast(out_h)), @as(c_int, @intCast(out_w)), self.scaleFactor, self.scaleFactor, 0.0, 0.0, @as(c_int, @intCast(codepoint)));
-
-                    const stride: usize = @trunc(s.w);
-                    const di = @as(usize, @intCast(y)) * stride + @as(usize, @intCast(x));
-                    for (0..out_h) |row| {
-                        for (0..out_w) |col| {
-                            const src = bitmap[row * out_w + col];
-                            const dest = di + (row + pad) * stride + (col + pad);
-
-                            // premultiplied white
-                            pixels[dest] = .{ .r = src, .g = src, .b = src, .a = src };
-                        }
-                    }
-                }
-
-                x += @as(i32, @trunc(gi.w)) + 2 * pad;
-
-                i += 1;
-                if (i % row_glyphs == 0) {
-                    x = pad;
-                    y += @intCast(row_height + 2 * pad);
-                    row_height = 0;
+                    gi.uvs[phase] = .{ cell.x / s.w, cell.y / s.h };
+                    try self.rasterizeCell(gpa, codepoint, gi.*, phase, pixels, stride, @intFromFloat(cell.x), @intFromFloat(cell.y));
                 }
             }
 
-            self.texture_atlas_cache = try backend.textureCreate(@ptrCast(pixels.ptr), .{ .width = @trunc(s.w), .height = @trunc(s.h) });
+            self.texture_atlas_cache = try backend.textureCreate(@ptrCast(pixels.ptr), .{ .width = @intCast(stride), .height = @intFromFloat(s.h) });
             return self.texture_atlas_cache.?;
+        }
+
+        /// Rasterise one glyph at subpixel `phase` into its atlas cell, whose
+        /// top left pixel is (`cell_x`, `cell_y`) in `pixels` (rows of
+        /// `stride`). The cell is `gi.cell_w` x `gi.h`; anything the
+        /// rasteriser draws outside it is clipped. A glyph that fails is left
+        /// empty, never an error.
+        fn rasterizeCell(self: *Entry, gpa: std.mem.Allocator, codepoint: u32, gi: GlyphInfo, phase: usize, pixels: []dvui.Color.PMA, stride: usize, cell_x: usize, cell_y: usize) std.mem.Allocator.Error!void {
+            if (gi.w <= 0 or gi.h <= 0) return;
+            const cell_w: i32 = @intFromFloat(gi.cell_w);
+            const cell_h: i32 = @intFromFloat(gi.h);
+            // where the rasterised bitmap's top left lands in the cell
+            var dx: i32 = 0;
+            var dy: i32 = 0;
+            var width: i32 = 0;
+            var rows: i32 = 0;
+
+            if (impl == .FreeType) {
+                FreeType.intToError(c.FT_Load_Glyph(self.face, gi.index, load_flags)) catch |err| {
+                    dvui.log.warn("renderText: freetype error {any} trying to FT_Load_Glyph codepoint {d}", .{ err, codepoint });
+                    return;
+                };
+                const slot = self.face.*.glyph;
+                // https://freetype.org/freetype2/docs/tutorial/step1.html#section-6
+                if (slot.*.format == c.FT_GLYPH_FORMAT_OUTLINE) {
+                    // 26.6: a quarter pixel is 16
+                    c.FT_Outline_Translate(&slot.*.outline, @intCast(phase * 64 / subpixel_phases), 0);
+                }
+                if (slot.*.format != c.FT_GLYPH_FORMAT_BITMAP) {
+                    FreeType.intToError(c.FT_Render_Glyph(slot, c.FT_RENDER_MODE_NORMAL)) catch |err| {
+                        dvui.log.warn("renderText freetype error {any} trying to FT_Render_Glyph codepoint {d}", .{ err, codepoint });
+                        return;
+                    };
+                }
+                const bitmap = slot.*.bitmap;
+                dx = slot.*.bitmap_left - @as(i32, @intFromFloat(gi.leftBearing));
+                dy = @as(i32, @intFromFloat(gi.topBearing)) - slot.*.bitmap_top;
+                width = @intCast(bitmap.width);
+                rows = @intCast(bitmap.rows);
+                const pitch: usize = @abs(bitmap.pitch);
+                const mono = bitmap.pixel_mode == c.FT_PIXEL_MODE_MONO;
+                if (!mono and bitmap.pixel_mode != c.FT_PIXEL_MODE_GRAY) return;
+                var row: i32 = 0;
+                while (row < rows) : (row += 1) {
+                    const y = dy + row;
+                    if (y < 0 or y >= cell_h) continue;
+                    var col: i32 = 0;
+                    while (col < width) : (col += 1) {
+                        const x = dx + col;
+                        if (x < 0 or x >= cell_w) continue;
+                        const line = bitmap.buffer + @as(usize, @intCast(row)) * pitch;
+                        const value: u8 = if (mono) mono: {
+                            const byte = line[@as(usize, @intCast(col)) >> 3];
+                            const bit: u3 = @intCast(7 - @mod(col, 8));
+                            break :mono if ((byte >> bit) & 1 != 0) 255 else 0;
+                        } else line[@intCast(col)];
+                        const di = (cell_y + @as(usize, @intCast(y))) * stride + cell_x + @as(usize, @intCast(x));
+                        // premultiplied white
+                        pixels[di] = .{ .r = value, .g = value, .b = value, .a = value };
+                    }
+                }
+            } else {
+                const shift: f32 = @as(f32, @floatFromInt(phase)) / @as(f32, @floatFromInt(subpixel_phases));
+                var ix0: c_int = 0;
+                var iy0: c_int = 0;
+                var ix1: c_int = 0;
+                var iy1: c_int = 0;
+                c.stbtt_GetCodepointBitmapBoxSubpixel(&self.face, @intCast(codepoint), self.scaleFactor, self.scaleFactor, shift, 0, &ix0, &iy0, &ix1, &iy1);
+                width = ix1 - ix0;
+                rows = iy1 - iy0;
+                if (width <= 0 or rows <= 0) return;
+                dx = ix0 - @as(i32, @intFromFloat(gi.leftBearing));
+                dy = iy0 + @as(i32, @intFromFloat(gi.topBearing));
+
+                // single channel
+                const bitmap = try gpa.alloc(u8, @as(usize, @intCast(width * rows)));
+                defer gpa.free(bitmap);
+                c.stbtt_MakeCodepointBitmapSubpixel(&self.face, bitmap.ptr, width, rows, width, self.scaleFactor, self.scaleFactor, shift, 0, @intCast(codepoint));
+
+                var row: i32 = 0;
+                while (row < rows) : (row += 1) {
+                    const y = dy + row;
+                    if (y < 0 or y >= cell_h) continue;
+                    var col: i32 = 0;
+                    while (col < width) : (col += 1) {
+                        const x = dx + col;
+                        if (x < 0 or x >= cell_w) continue;
+                        const value = bitmap[@intCast(row * width + col)];
+                        const di = (cell_y + @as(usize, @intCast(y))) * stride + cell_x + @as(usize, @intCast(x));
+                        // premultiplied white
+                        pixels[di] = .{ .r = value, .g = value, .b = value, .a = value };
+                    }
+                }
+            }
         }
 
         /// If a codepoint is missing in the font it gets the glyph for
@@ -832,33 +953,57 @@ pub const Cache = struct {
         }
 
         pub fn glyphInfoGenerate(self: *Entry, codepoint: u32) Error!GlyphInfo {
+            const no_uvs: [subpixel_phases]@Vector(2, f32) = @splat(.{ 0, 0 });
             const gi: GlyphInfo = if (impl == .FreeType) blk: {
-                FreeType.intToError(c.FT_Load_Char(self.face, codepoint, @as(i32, @bitCast(FreeType.LoadFlags{ .render = false })))) catch |err| {
+                const index = c.FT_Get_Char_Index(self.face, codepoint);
+                FreeType.intToError(c.FT_Load_Glyph(self.face, index, load_flags)) catch |err| {
                     dvui.log.warn("glyphInfoGet freetype error {any} font {s} codepoint {d}\n", .{ err, self.name, codepoint });
                     return Error.FontError;
                 };
+                const slot = self.face.*.glyph;
 
-                const m = self.face.*.glyph.*.metrics;
+                // The outline's own advance, scaled but never hinted or
+                // rounded: what the pen moves by, as in a browser.
+                const advance = @as(f32, @floatFromInt(slot.*.linearHoriAdvance)) / 65536.0;
+
+                if (slot.*.format == c.FT_GLYPH_FORMAT_OUTLINE) {
+                    // The box the rasteriser fills (26.6), widened by the
+                    // most a subpixel phase moves the ink.
+                    var box: c.FT_BBox = undefined;
+                    c.FT_Outline_Get_CBox(&slot.*.outline, &box);
+                    const left = @divFloor(box.xMin, 64);
+                    const right = -@divFloor(-box.xMax, 64);
+                    const shift_most = 64 * (subpixel_phases - 1) / subpixel_phases;
+                    const right_shifted = -@divFloor(-(box.xMax + shift_most), 64);
+                    const top = -@divFloor(-box.yMax, 64);
+                    const bottom = @divFloor(box.yMin, 64);
+                    const empty = box.xMax <= box.xMin or box.yMax <= box.yMin;
+                    break :blk .{
+                        .advance = advance,
+                        .leftBearing = @floatFromInt(left),
+                        .topBearing = @floatFromInt(top),
+                        .w = if (empty) 0 else @floatFromInt(right - left),
+                        .h = if (empty) 0 else @floatFromInt(top - bottom),
+                        .cell_w = if (empty) 0 else @floatFromInt(right_shifted - left),
+                        .index = index,
+                        .uvs = no_uvs,
+                    };
+                }
+
+                // An embedded bitmap: drawn as it is at every phase.
+                const m = slot.*.metrics;
                 const minx = @as(f32, @floatFromInt(m.horiBearingX)) / 64.0;
                 const miny = @as(f32, @floatFromInt(m.horiBearingY)) / 64.0;
-
-                //const hx = @as(f32, @floatFromInt(m.horiBearingX)) / 64.0;
-                //const w = @as(f32, @floatFromInt(m.width)) / 64.0;
-                //const hy = @as(f32, @floatFromInt(m.horiBearingY)) / 64.0;
-                //const h = @as(f32, @floatFromInt(m.height)) / 64.0;
-                const adv = @as(f32, @floatFromInt(m.horiAdvance)) / 64.0;
-                //std.debug.print("{c},{d},{d},{d},{d},{d},{d}\n", .{@as(u8, @intCast(codepoint)), codepoint, hx, w, hy, h, adv});
-
-                // All these values should be integers, but just in case.
-                // bitmap assumes pen position is at a pixel boundary.
-
+                const w = @ceil(minx + @as(f32, @floatFromInt(m.width)) / 64.0) - @floor(minx);
                 break :blk .{
-                    .advance = adv,
+                    .advance = advance,
                     .leftBearing = @floor(minx),
                     .topBearing = @floor(miny),
-                    .w = @ceil(minx + @as(f32, @floatFromInt(m.width)) / 64.0) - @floor(minx),
+                    .w = w,
                     .h = @ceil(miny + @as(f32, @floatFromInt(m.height)) / 64.0) - @floor(miny),
-                    .uv = .{ 0, 0 },
+                    .cell_w = w,
+                    .index = index,
+                    .uvs = no_uvs,
                 };
             } else blk: {
                 var advanceWidth: c_int = undefined;
@@ -874,39 +1019,53 @@ pub const Cache = struct {
                 const y1: f32 = if (ret == 0) 0 else self.scaleFactor * @as(f32, @floatFromInt(iy1));
                 const adv: f32 = self.scaleFactor * @as(f32, @floatFromInt(advanceWidth));
 
-                //std.debug.print("{c},{d},{d},{d},{d},{d},{d}\n", .{@as(u8, @intCast(codepoint)), codepoint, x0, x1, y0, y1, adv});
-                //std.debug.print("{d} codepoint {d} stbtt x0 {d} {d} x1 {d} {d} y0 {d} {d} y1 {d} {d}\n", .{ self.ascent, codepoint, ix0, x0, ix1, x1, iy0, y0, iy1, y1 });
-
                 // bitmap assumes pen position is at a pixel boundary, so we
                 // extend the box in each direction to a full pixel (so floor
-                // x0/y0, and ceil x1/y1)
-
+                // x0/y0, and ceil x1/y1); the cell also holds the ink moved
+                // by the largest subpixel phase.
+                const shift_most = @as(f32, @floatFromInt(subpixel_phases - 1)) / @as(f32, @floatFromInt(subpixel_phases));
+                const w = @ceil(x1) - @floor(x0);
                 break :blk .{
                     .advance = adv,
                     .leftBearing = @floor(x0),
                     .topBearing = @ceil(y1),
-                    .w = @ceil(x1) - @floor(x0),
+                    .w = w,
                     .h = @ceil(y1) - @floor(y0),
-                    .uv = .{ 0, 0 },
+                    .cell_w = if (w <= 0) 0 else @ceil(x1 + shift_most) - @floor(x0),
+                    .uvs = no_uvs,
                 };
             };
             //std.debug.print("codepoint {d} advance {d} leftBearing {d} topBearing {d} w {d} h {d}\n", .{ codepoint, gi.advance, gi.leftBearing, gi.topBearing, gi.w, gi.h });
             return gi;
         }
 
+        /// The glyph index of `codepoint` in the face (FreeType), from the
+        /// glyph cache when it is there.
+        fn glyphIndex(self: *Entry, codepoint: u32) u32 {
+            if (impl != .FreeType) return 0;
+            if (ascii_start <= codepoint and codepoint < ascii_size) return self.glyph_info_ascii[codepoint - ascii_start].index;
+            if (self.glyph_info.get(codepoint)) |gi| return gi.index;
+            return c.FT_Get_Char_Index(self.face, codepoint);
+        }
+
+        /// The pen adjustment between two glyphs, in pixels at this size (not
+        /// rounded). FreeType: from the face's `GPOS` pair kerning when it has
+        /// one, else from its legacy `kern` table.
         pub fn kern(fce: *Entry, codepoint1: u32, codepoint2: u32) f32 {
             if (impl == .FreeType) {
+                if (fce.gpos) |*gpos| {
+                    const units = gpos.pair(fce.glyphIndex(codepoint1), fce.glyphIndex(codepoint2));
+                    return @as(f32, @floatFromInt(units)) * fce.unit_scale;
+                }
                 // A face without a legacy `kern` table has nothing for
                 // `FT_Get_Kerning` to read: it answers zero for every pair.
                 // Asking anyway cost two cmap lookups and the call itself for
                 // EVERY glyph of every line measured or drawn — a sixteenth of
-                // an idle editor frame, on fonts (Geist: GPOS only) that can
-                // never answer anything but zero.
+                // an idle editor frame, on fonts that can never answer
+                // anything but zero.
                 if (!hasKerning(fce.face)) return 0;
-                const index1 = c.FT_Get_Char_Index(fce.face, codepoint1);
-                const index2 = c.FT_Get_Char_Index(fce.face, codepoint2);
                 var k: c.FT_Vector = undefined;
-                FreeType.intToError(c.FT_Get_Kerning(fce.face, index1, index2, c.FT_KERNING_DEFAULT, &k)) catch |err| {
+                FreeType.intToError(c.FT_Get_Kerning(fce.face, fce.glyphIndex(codepoint1), fce.glyphIndex(codepoint2), c.FT_KERNING_UNFITTED, &k)) catch |err| {
                     dvui.log.warn("renderText freetype error {any} trying to FT_Get_Kerning font {s} codepoints {d} {d}\n", .{ err, fce.name, codepoint1, codepoint2 });
                     k.x = 0;
                     k.y = 0;
@@ -931,7 +1090,6 @@ pub const Cache = struct {
         ) std.mem.Allocator.Error!Size {
             const mwidth = opts.max_width orelse dvui.max_float_safe;
 
-            const snap = dvui.snapToPixels();
             var x: f32 = 0;
             var minx: f32 = 0;
             var maxx: f32 = 0;
@@ -966,8 +1124,11 @@ pub const Cache = struct {
                 const gi = try self.glyphInfoGetOrReplacement(gpa, codepoint);
 
                 if (kerning and last_codepoint != 0 and i >= next_kern_byte) {
+                    // never rounded: renderText draws each glyph at its
+                    // pen's subpixel phase, so the run is as wide as the
+                    // outline's advances and kerning say
                     const kk = self.kern(last_codepoint, codepoint);
-                    x += if (snap) @round(kk) else kk;
+                    x += kk;
 
                     if (opts.kern_in) |ki| {
                         if (next_kern_idx < ki.len) {
@@ -992,7 +1153,7 @@ pub const Cache = struct {
                 i += cplen;
                 last_codepoint = codepoint;
 
-                const adv = if (snap) @round(gi.advance) else gi.advance;
+                const adv = gi.advance;
 
                 minx = @min(minx, x + gi.leftBearing);
                 maxx = @max(maxx, x + gi.leftBearing + gi.w);
@@ -1221,4 +1382,206 @@ test "a face with no kern table is never asked for a pair, and one with it still
     try std.testing.expect(!hasKerning(plain));
     try FreeType.intToError(c.FT_Get_Kerning(plain, c.FT_Get_Char_Index(plain, 'A'), c.FT_Get_Char_Index(plain, 'V'), c.FT_KERNING_DEFAULT, &pair));
     try std.testing.expectEqual(@as(c.FT_Pos, 0), pair.x);
+}
+
+const test_vera = @embedFile("fonts/bitstream-vera/Vera.ttf");
+const test_aleo = @embedFile("fonts/Aleo/static/Aleo-Regular.ttf");
+
+/// A test's view of one font file through FreeType directly: what the font
+/// itself says, to hold dvui's measuring and drawing to.
+const TestFace = struct {
+    library: c.FT_Library,
+    face: c.FT_Face,
+
+    fn open(bytes: []const u8) !TestFace {
+        var library: c.FT_Library = undefined;
+        try FreeType.intToError(c.FT_Init_FreeType(&library));
+        errdefer _ = c.FT_Done_FreeType(library);
+        var face: c.FT_Face = undefined;
+        try FreeType.intToError(c.FT_New_Memory_Face(library, bytes.ptr, @intCast(bytes.len), 0, &face));
+        return .{ .library = library, .face = face };
+    }
+
+    fn close(self: *TestFace) void {
+        _ = c.FT_Done_Face(self.face);
+        _ = c.FT_Done_FreeType(self.library);
+    }
+
+    /// The glyph's advance in physical pixels at `pixels` per em, exactly as
+    /// the outline says (no hinting, no rounding).
+    fn advance(self: *TestFace, codepoint: u32, pixels: f32) !f32 {
+        var units: c.FT_Fixed = 0;
+        // 1 is FT_LOAD_NO_SCALE: the advance in font units
+        try FreeType.intToError(c.FT_Get_Advance(self.face, c.FT_Get_Char_Index(self.face, codepoint), 1, &units));
+        return @as(f32, @floatFromInt(units)) * pixels / @as(f32, @floatFromInt(self.face.*.units_per_EM));
+    }
+
+    const Profile = struct { left: i32, shares: []f32 };
+
+    /// The share of the glyph's ink in each pixel column, rendered with no
+    /// hinting at `pixels` per em with its origin on a pixel edge, from
+    /// column `left` on.
+    fn columnProfile(self: *TestFace, gpa: std.mem.Allocator, codepoint: u32, pixels: f32) !Profile {
+        try FreeType.intToError(c.FT_Set_Char_Size(self.face, 0, @intFromFloat(@round(pixels * 64)), 72, 72));
+        // FT_LOAD_NO_HINTING | FT_LOAD_RENDER
+        try FreeType.intToError(c.FT_Load_Char(self.face, codepoint, (1 << 1) | (1 << 2)));
+        const glyph = self.face.*.glyph.*;
+        const bitmap = glyph.bitmap;
+        const shares = try gpa.alloc(f32, bitmap.width);
+        @memset(shares, 0);
+        var total: f32 = 0;
+        for (0..bitmap.rows) |row| {
+            for (0..bitmap.width) |col| {
+                const value: f32 = @floatFromInt(bitmap.buffer[row * @as(usize, @intCast(bitmap.pitch)) + col]);
+                shares[col] += value;
+                total += value;
+            }
+        }
+        for (shares) |*share| share.* /= total;
+        return .{ .left = glyph.bitmap_left, .shares = shares };
+    }
+};
+
+/// Draw `text` once with `renderText` into a picture `size` physical pixels
+/// big, its top left at `origin` and `font.size * scale` pixels per em, and
+/// answer each pixel's coverage (0..1), row by row.
+fn testDraw(gpa: std.mem.Allocator, text: []const u8, font: Font, scale: f32, origin: dvui.Point.Physical, size: dvui.Size.Physical) ![]f32 {
+    const rect: dvui.Rect.Physical = .{ .x = 0, .y = 0, .w = size.w, .h = size.h };
+    var picture = dvui.Picture.start(rect) orelse return error.SkipZigTest;
+    try dvui.renderText(.{ .font = font, .text = text, .rs = .{ .r = rect, .s = scale }, .color = .white, .p = origin });
+    picture.stop();
+    const cw = dvui.currentWindow();
+    const pixels = try dvui.textureReadTarget(cw.lifo(), picture.texture);
+    defer cw.lifo().free(pixels);
+    const coverage = try gpa.alloc(f32, pixels.len);
+    for (pixels, coverage) |pixel, *out| out.* = @as(f32, @floatFromInt(pixel.a)) / 255.0;
+    picture.deinit();
+    return coverage;
+}
+
+/// The ink in each column of `coverage` (rows of `width`).
+fn testColumns(gpa: std.mem.Allocator, coverage: []const f32, width: usize) ![]f32 {
+    const columns = try gpa.alloc(f32, width);
+    @memset(columns, 0);
+    for (coverage, 0..) |value, index| columns[index % width] += value;
+    return columns;
+}
+
+test "a run of glyphs measures the sum of their exact advances, never rounded ones" {
+    if (impl != .FreeType) return error.SkipZigTest;
+    var t = try dvui.testing.init(.{ .window_size = .{ .w = 400, .h = 100 } });
+    defer t.deinit();
+    try dvui.addFont("VeraAdvance", test_vera, null);
+
+    var face = try TestFace.open(test_vera);
+    defer face.close();
+
+    // 8.75 logical pixels at the testing window's scale of 2: 17.5 physical,
+    // a size whose advances are nowhere near whole pixels.
+    const font: Font = .find(.{ .family = "VeraAdvance", .size = 8.75, .size_mode = .pixel });
+    const scale = dvui.windowNaturalScale();
+    try std.testing.expectEqual(@as(f32, 2), scale);
+    const expected = 10 * try face.advance('m', font.size * scale) / scale;
+    const measured = font.textSize("mmmmmmmmmm").w;
+    errdefer std.debug.print("ten m measure {d} logical, the outline says {d}\n", .{ measured, expected });
+    try std.testing.expectApproxEqAbs(expected, measured, 0.01);
+}
+
+test "a glyph is drawn at the pen's fractional position, a quarter pixel at most off" {
+    if (impl != .FreeType) return error.SkipZigTest;
+    var t = try dvui.testing.init(.{ .window_size = .{ .w = 400, .h = 100 } });
+    defer t.deinit();
+    try dvui.addFont("VeraPen", test_vera, null);
+
+    var face = try TestFace.open(test_vera);
+    defer face.close();
+
+    const font: Font = .find(.{ .family = "VeraPen", .size = 8.75, .size_mode = .pixel });
+    const scale: f32 = 2;
+    const advance = try face.advance('l', font.size * scale);
+
+    const size: dvui.Size.Physical = .{ .w = 160, .h = 40 };
+    const width: usize = @intFromFloat(size.w);
+    const coverage = try testDraw(std.testing.allocator, "llllllllll", font, scale, .{ .x = 10, .y = 10 }, size);
+    defer std.testing.allocator.free(coverage);
+    const columns = try testColumns(std.testing.allocator, coverage, width);
+    defer std.testing.allocator.free(columns);
+
+    // Each 'l' is one stem; its ink's centre must move by exactly one
+    // advance per glyph (4.86 px here). Rounded advances or pens drift.
+    var first: f32 = 0;
+    var worst: f32 = 0;
+    for (0..10) |index| {
+        const from: f32 = 10 + @as(f32, @floatFromInt(index)) * advance - 0.5;
+        var ink: f32 = 0;
+        var moment: f32 = 0;
+        var column: usize = @intFromFloat(@max(0, @floor(from)));
+        while (@as(f32, @floatFromInt(column)) < from + advance) : (column += 1) {
+            ink += columns[column];
+            moment += columns[column] * (@as(f32, @floatFromInt(column)) + 0.5);
+        }
+        const centre = moment / ink;
+        if (index == 0) first = centre;
+        const off = @abs(centre - first - @as(f32, @floatFromInt(index)) * advance);
+        worst = @max(worst, off);
+    }
+    errdefer std.debug.print("an 'l' strays {d} px from where its pen put it\n", .{worst});
+    try std.testing.expect(worst <= 0.25);
+}
+
+test "glyphs are hinted lightly: a stem keeps the outline's horizontal shape" {
+    if (impl != .FreeType) return error.SkipZigTest;
+    var t = try dvui.testing.init(.{ .window_size = .{ .w = 400, .h = 100 } });
+    defer t.deinit();
+    try dvui.addFont("VeraHint", test_vera, null);
+
+    var face = try TestFace.open(test_vera);
+    defer face.close();
+
+    const font: Font = .find(.{ .family = "VeraHint", .size = 8.75, .size_mode = .pixel });
+    const scale: f32 = 2;
+    const reference = try face.columnProfile(std.testing.allocator, 'm', font.size * scale);
+    defer std.testing.allocator.free(reference.shares);
+
+    const size: dvui.Size.Physical = .{ .w = 60, .h = 40 };
+    const width: usize = @intFromFloat(size.w);
+    const coverage = try testDraw(std.testing.allocator, "m", font, scale, .{ .x = 10, .y = 10 }, size);
+    defer std.testing.allocator.free(coverage);
+    const columns = try testColumns(std.testing.allocator, coverage, width);
+    defer std.testing.allocator.free(columns);
+    var total: f32 = 0;
+    for (columns) |ink| total += ink;
+
+    // Full hinting moves and widens the stems to whole pixels; light hinting
+    // only fits the glyph vertically, so its columns carry the outline's ink.
+    var distance: f32 = 0;
+    for (columns, 0..) |ink, column| {
+        const ref_column = @as(i32, @intCast(column)) - 10 - reference.left;
+        const expected = if (ref_column >= 0 and ref_column < reference.shares.len) reference.shares[@intCast(ref_column)] else 0;
+        distance += @abs(ink / total - expected);
+    }
+    errdefer std.debug.print("the drawn m's columns differ from the outline's by {d} (of 2)\n", .{distance});
+    try std.testing.expect(distance < 0.1);
+}
+
+test "kerning comes from the font's GPOS table when it has no kern table" {
+    if (impl != .FreeType) return error.SkipZigTest;
+    var t = try dvui.testing.init(.{ .window_size = .{ .w = 400, .h = 100 } });
+    defer t.deinit();
+    try dvui.addFont("AleoKern", test_aleo, null);
+
+    // Aleo (like Geist, Inter and most fonts made since) kerns in GPOS only:
+    // "AV" is -170 units of 1000, "To" -30 (fontTools reads the same).
+    const font: Font = .find(.{ .family = "AleoKern", .size = 8.75, .size_mode = .pixel });
+    for ([_]struct { text: []const u8, units: f32 }{
+        .{ .text = "AV", .units = -170 },
+        .{ .text = "To", .units = -30 },
+        .{ .text = "xx", .units = 0 },
+    }) |case| {
+        const kerned = font.textSizeEx(case.text, .{ .kerning = true }).w;
+        const plain = font.textSizeEx(case.text, .{ .kerning = false }).w;
+        const expected = case.units * font.size / 1000;
+        errdefer std.debug.print("\"{s}\" kerns by {d} logical, the font says {d}\n", .{ case.text, kerned - plain, expected });
+        try std.testing.expectApproxEqAbs(expected, kerned - plain, 0.01);
+    }
 }
