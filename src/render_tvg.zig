@@ -1,6 +1,15 @@
 //! TVG (TinyVG) icon rendering.
 //!
-//! Parses a TVG byte stream and emits `dvui.Triangles` built from
+//! An icon up to `raster_limit` physical pixels is drawn the way a browser
+//! draws an SVG: each fill and each stroke is scan-converted once by
+//! `coverage.zig` into a texture of the icon's physical size (at its
+//! subpixel phase), its overlapping pieces resolved by winding first, so a
+//! stroke's segments and round joins are inked once and a curve is even
+//! (`renderIconRaster`). The texture is cached by icon, size, phase and
+//! options, and drawn as one quad.
+//!
+//! A bigger icon (or one drawn into a mesh by a caller) takes the mesh
+//! path below: it emits `dvui.Triangles` built from
 //! `dvui.Path.fillTriangles` / `dvui.Path.fillConvexTriangles` /
 //! `dvui.Path.strokeTriangles` - i.e. the same AA'd polygon-fill and
 //! bezier-flattening machinery every other widget uses. No raster
@@ -189,6 +198,19 @@ pub fn renderIcon(name: []const u8, tvg_bytes: []const u8, rs: dvui.RectScale, o
     if (ask_height <= 0) return;
     const ask_width = dvui.iconWidth(name, tvg_bytes, ask_height) catch ask_height;
 
+    const render_opts: RenderOptions = .{
+        .fill_color_override = icon_opts.fill_color,
+        .stroke_color_override = icon_opts.stroke_color,
+        .stroke_width_override = icon_opts.stroke_width,
+        .disable_fill = if (icon_opts.fill_color) |c| c.toColor().a == 0 else false,
+        .keep_aspect = true,
+        .fade = 1.0,
+    };
+
+    if (rs.r.w <= raster_limit and rs.r.h <= raster_limit) {
+        return renderIconRaster(name, tvg_bytes, rs, opts, render_opts, icon_opts);
+    }
+
     var h = dvui.fnv.init();
     h.update(std.mem.asBytes(&tvg_bytes.ptr));
     h.update(std.mem.asBytes(&ask_height));
@@ -205,14 +227,6 @@ pub fn renderIcon(name: []const u8, tvg_bytes: []const u8, rs: dvui.RectScale, o
         defer scratch.deinit();
 
         const local_rect: Rect = .{ .x = 0, .y = 0, .w = ask_width, .h = ask_height };
-        const render_opts: RenderOptions = .{
-            .fill_color_override = icon_opts.fill_color,
-            .stroke_color_override = icon_opts.stroke_color,
-            .stroke_width_override = icon_opts.stroke_width,
-            .disable_fill = if (icon_opts.fill_color) |c| c.toColor().a == 0 else false,
-            .keep_aspect = true,
-            .fade = 1.0,
-        };
 
         appendTvg(scratch.allocator(), &mesh, tvg_bytes, local_rect, render_opts) catch |err| {
             mesh.deinit();
@@ -279,6 +293,331 @@ pub fn renderIcon(name: []const u8, tvg_bytes: []const u8, rs: dvui.RectScale, o
     tri.color(opts.colormod.opacity(cw.alpha));
 
     try dvui.renderTriangles(tri, tri.texture);
+}
+
+// ---------------------------------------------------------------------------
+// Coverage raster: an icon drawn once into a texture
+// ---------------------------------------------------------------------------
+
+/// Icons up to this many physical pixels on a side are drawn from a
+/// coverage raster (`renderIconRaster`); a larger one is drawn as a mesh.
+pub const raster_limit: f32 = 512;
+
+/// The raster flattens curves this many times larger than it draws them, so
+/// the 0.5 px chord tolerance of `flattenArc` and `Path.Builder` is 1/8 px
+/// on the icon: a circle stays round at a stroke two pixels wide.
+const raster_oversample: f32 = 4;
+
+/// Subpixel positions an icon is rasterised at, per axis: its top left lands
+/// within 1/8 px of where the layout put it.
+const raster_phases: f32 = 4;
+
+/// Draw the icon from a texture rasterised for exactly this size and
+/// subpixel position (cached in the texture cache), one quad a frame.
+///
+/// Every fill and every stroke is a shape the coverage rasteriser fills
+/// once (`coverage.zig`): a stroke is the union of a band per segment and a
+/// disc per joint and end, resolved by winding before any pixel is counted,
+/// so its joints carry exactly the ink of the rest of it. A mesh of
+/// separately anti-aliased pieces lays two fading edges over each other at
+/// every joint and beads a curve.
+fn renderIconRaster(name: []const u8, tvg_bytes: []const u8, rs: dvui.RectScale, opts: dvui.render.TextureOptions, render_opts: RenderOptions, icon_opts: dvui.IconRenderOptions) Backend.TextureError!void {
+    // the icon's size, quantised so a size that wobbles by a rounding error
+    // reuses its texture
+    const width = @round(rs.r.w * 64) / 64;
+    const height = @round(rs.r.h * 64) / 64;
+    if (width <= 0 or height <= 0) return;
+
+    // Where the texture goes and where the icon sits inside it. Unrotated:
+    // the texture starts on the pixel the icon starts in, the icon at its
+    // subpixel phase inside. Rotated: centred, so it turns about its middle.
+    var draw: Rect = undefined;
+    var offset: Point = undefined;
+    if (opts.rotation == 0) {
+        var left = @floor(rs.r.x);
+        var top = @floor(rs.r.y);
+        offset = .{
+            .x = @round((rs.r.x - left) * raster_phases) / raster_phases,
+            .y = @round((rs.r.y - top) * raster_phases) / raster_phases,
+        };
+        if (offset.x >= 1) {
+            left += 1;
+            offset.x = 0;
+        }
+        if (offset.y >= 1) {
+            top += 1;
+            offset.y = 0;
+        }
+        draw = .{ .x = left, .y = top, .w = @ceil(offset.x + width), .h = @ceil(offset.y + height) };
+    } else {
+        const texture_w = @ceil(width);
+        const texture_h = @ceil(height);
+        offset = .{ .x = (texture_w - width) / 2, .y = (texture_h - height) / 2 };
+        const centre = rs.r.center();
+        draw = .{ .x = centre.x - texture_w / 2, .y = centre.y - texture_h / 2, .w = texture_w, .h = texture_h };
+    }
+
+    var h = dvui.fnv.init();
+    h.update("tvg raster");
+    h.update(std.mem.asBytes(&tvg_bytes.ptr));
+    h.update(std.mem.asBytes(&tvg_bytes.len));
+    hashValue(&h, width);
+    hashValue(&h, height);
+    hashValue(&h, offset.x);
+    hashValue(&h, offset.y);
+    hashValue(&h, draw.w);
+    hashValue(&h, draw.h);
+    hashValue(&h, icon_opts);
+    const key = h.final();
+
+    const texture = dvui.textureGetCached(key) orelse blk: {
+        const cw = dvui.currentWindow();
+        var scratch = std.heap.ArenaAllocator.init(cw.gpa);
+        defer scratch.deinit();
+        const texture_w: u32 = @intFromFloat(draw.w);
+        const texture_h: u32 = @intFromFloat(draw.h);
+        const pixels = rasterTvg(scratch.allocator(), tvg_bytes, .{ .x = offset.x, .y = offset.y, .w = width, .h = height }, texture_w, texture_h, render_opts) catch |err| {
+            dvui.logError(@src(), err, "Could not rasterise tvg file \"{s}\"", .{name});
+            return;
+        };
+        const texture = try dvui.Texture.fromPixelsPMA(pixels, texture_w, texture_h, .linear);
+        dvui.textureAddToCache(key, texture);
+        break :blk texture;
+    };
+
+    try dvui.renderTexture(texture, .{ .r = draw, .s = rs.s }, opts);
+}
+
+/// Rasterise `tvg_bytes` fitted into `rect` (physical pixels, inside a
+/// `texture_w` x `texture_h` image) into premultiplied pixels, every
+/// command composited over the ones before it. Allocates from `arena`.
+fn rasterTvg(arena: std.mem.Allocator, tvg_bytes: []const u8, rect: Rect, texture_w: u32, texture_h: u32, opts_in: RenderOptions) ![]Color.PMA {
+    var fbs: std.Io.Reader = .fixed(tvg_bytes);
+    var parser = try tvg.parse(arena, &fbs);
+    defer parser.deinit();
+
+    // all geometry is built `raster_oversample` times larger than drawn
+    const big: Rect = .{
+        .x = rect.x * raster_oversample,
+        .y = rect.y * raster_oversample,
+        .w = rect.w * raster_oversample,
+        .h = rect.h * raster_oversample,
+    };
+    const xf = Transform.fromRect(big, @floatFromInt(parser.header.width), @floatFromInt(parser.header.height), opts_in.keep_aspect);
+    var opts = opts_in;
+    opts.bounds = big;
+
+    var canvas: Canvas = try .init(arena, texture_w, texture_h);
+    while (try parser.next()) |cmd| {
+        try rasterCommand(arena, &canvas, parser.color_table, cmd, xf, opts);
+    }
+    return canvas.finish(arena);
+}
+
+/// The image a raster is composited into, and the scratch it fills shapes
+/// with.
+const Canvas = struct {
+    width: usize,
+    height: usize,
+    /// premultiplied r, g, b, a per pixel
+    pixels: []@Vector(4, f32),
+    coverage: []f32,
+    raster: coverage_raster.Rasterizer,
+
+    fn init(arena: std.mem.Allocator, width: u32, height: u32) !Canvas {
+        const count = @as(usize, width) * height;
+        const pixels = try arena.alloc(@Vector(4, f32), count);
+        @memset(pixels, @splat(0));
+        var raster: coverage_raster.Rasterizer = .init(width, height);
+        raster.scale = 1.0 / raster_oversample;
+        return .{
+            .width = width,
+            .height = height,
+            .pixels = pixels,
+            .coverage = try arena.alloc(f32, count),
+            .raster = raster,
+        };
+    }
+
+    /// Fill the shape added to `raster` by `rule` and lay `source` over the
+    /// image through it; the raster is emptied for the next shape.
+    fn paint(self: *Canvas, rule: coverage_raster.FillRule, source: ColorSource) void {
+        defer self.raster.reset();
+        if (self.raster.crossings.items.len == 0) return;
+        self.raster.fill(rule, self.coverage);
+        for (self.coverage, self.pixels, 0..) |share, *pixel, index| {
+            if (share <= 0) continue;
+            const color: Color.PMA = switch (source) {
+                .flat => |pma| pma,
+                // gradients are sampled where the geometry was built
+                else => source.sample(.{
+                    .x = (@as(f32, @floatFromInt(index % self.width)) + 0.5) * raster_oversample,
+                    .y = (@as(f32, @floatFromInt(index / self.width)) + 0.5) * raster_oversample,
+                }),
+            };
+            const src: @Vector(4, f32) = .{
+                @as(f32, @floatFromInt(color.r)) / 255.0 * share,
+                @as(f32, @floatFromInt(color.g)) / 255.0 * share,
+                @as(f32, @floatFromInt(color.b)) / 255.0 * share,
+                @as(f32, @floatFromInt(color.a)) / 255.0 * share,
+            };
+            pixel.* = src + pixel.* * @as(@Vector(4, f32), @splat(1 - src[3]));
+        }
+    }
+
+    fn finish(self: *Canvas, arena: std.mem.Allocator) ![]Color.PMA {
+        const out = try arena.alloc(Color.PMA, self.pixels.len);
+        for (self.pixels, out) |pixel, *pma| {
+            const bytes = @round(@min(@as(@Vector(4, f32), @splat(1)), @max(@as(@Vector(4, f32), @splat(0)), pixel)) * @as(@Vector(4, f32), @splat(255)));
+            pma.* = .{ .r = @intFromFloat(bytes[0]), .g = @intFromFloat(bytes[1]), .b = @intFromFloat(bytes[2]), .a = @intFromFloat(bytes[3]) };
+        }
+        return out;
+    }
+};
+
+fn rasterCommand(arena: std.mem.Allocator, canvas: *Canvas, color_table: []const tvg.Color, cmd: parsing.DrawCommand, xf: Transform, opts: RenderOptions) !void {
+    const raster = &canvas.raster;
+    switch (cmd) {
+        .fill_polygon => |fp| if (!opts.disable_fill) {
+            try addPolygon(arena, raster, fp.vertices, xf);
+            canvas.paint(.evenodd, resolveStyleSource(fp.style, color_table, opts, xf, false));
+        },
+        .fill_rectangles => |fr| if (!opts.disable_fill) {
+            for (fr.rectangles) |r| try addRectangle(arena, raster, r, xf);
+            canvas.paint(.nonzero, resolveStyleSource(fr.style, color_table, opts, xf, false));
+        },
+        .fill_path => |fp| if (!opts.disable_fill) {
+            try addPathFill(arena, raster, fp.path, xf);
+            canvas.paint(.evenodd, resolveStyleSource(fp.style, color_table, opts, xf, false));
+        },
+        .draw_lines => |dl| {
+            const half = (opts.stroke_width_override orelse dl.line_width) * xf.meanScale() / 2;
+            for (dl.lines) |ln| try addStroke(arena, raster, &.{ xf.apply(ln.start), xf.apply(ln.end) }, false, half);
+            canvas.paint(.nonzero, resolveStyleSource(dl.style, color_table, opts, xf, true));
+        },
+        .draw_line_loop => |ls| {
+            try addPolylineStroke(arena, raster, ls.vertices, true, (opts.stroke_width_override orelse ls.line_width) * xf.meanScale() / 2, xf);
+            canvas.paint(.nonzero, resolveStyleSource(ls.style, color_table, opts, xf, true));
+        },
+        .draw_line_strip => |ls| {
+            try addPolylineStroke(arena, raster, ls.vertices, false, (opts.stroke_width_override orelse ls.line_width) * xf.meanScale() / 2, xf);
+            canvas.paint(.nonzero, resolveStyleSource(ls.style, color_table, opts, xf, true));
+        },
+        .draw_line_path => |dp| {
+            try addPathStroke(arena, raster, dp.path, (opts.stroke_width_override orelse dp.line_width) * xf.meanScale() / 2, xf);
+            canvas.paint(.nonzero, resolveStyleSource(dp.style, color_table, opts, xf, true));
+        },
+        .outline_fill_polygon => |o| {
+            if (!opts.disable_fill) {
+                try addPolygon(arena, raster, o.vertices, xf);
+                canvas.paint(.evenodd, resolveStyleSource(o.fill_style, color_table, opts, xf, false));
+            }
+            try addPolylineStroke(arena, raster, o.vertices, true, (opts.stroke_width_override orelse o.line_width) * xf.meanScale() / 2, xf);
+            canvas.paint(.nonzero, resolveStyleSource(o.line_style, color_table, opts, xf, true));
+        },
+        .outline_fill_rectangles => |o| {
+            const half = (opts.stroke_width_override orelse o.line_width) * xf.meanScale() / 2;
+            for (o.rectangles) |r| {
+                if (!opts.disable_fill) {
+                    try addRectangle(arena, raster, r, xf);
+                    canvas.paint(.nonzero, resolveStyleSource(o.fill_style, color_table, opts, xf, false));
+                }
+                const corners = [_]Point{
+                    xf.applyXY(r.x, r.y),
+                    xf.applyXY(r.x + r.width, r.y),
+                    xf.applyXY(r.x + r.width, r.y + r.height),
+                    xf.applyXY(r.x, r.y + r.height),
+                };
+                try addStroke(arena, raster, &corners, true, half);
+                canvas.paint(.nonzero, resolveStyleSource(o.line_style, color_table, opts, xf, true));
+            }
+        },
+        .outline_fill_path => |o| {
+            if (!opts.disable_fill) {
+                try addPathFill(arena, raster, o.path, xf);
+                canvas.paint(.evenodd, resolveStyleSource(o.fill_style, color_table, opts, xf, false));
+            }
+            try addPathStroke(arena, raster, o.path, (opts.stroke_width_override orelse o.line_width) * xf.meanScale() / 2, xf);
+            canvas.paint(.nonzero, resolveStyleSource(o.line_style, color_table, opts, xf, true));
+        },
+    }
+}
+
+fn addPolygon(arena: std.mem.Allocator, raster: *coverage_raster.Rasterizer, vertices: []const tvg.Point, xf: Transform) !void {
+    const points = try arena.alloc(Point, vertices.len);
+    for (vertices, points) |vertex, *point| point.* = xf.apply(vertex);
+    try raster.addContour(arena, points);
+}
+
+fn addRectangle(arena: std.mem.Allocator, raster: *coverage_raster.Rasterizer, r: tvg.Rectangle, xf: Transform) !void {
+    try raster.addContour(arena, &.{
+        xf.applyXY(r.x, r.y),
+        xf.applyXY(r.x + r.width, r.y),
+        xf.applyXY(r.x + r.width, r.y + r.height),
+        xf.applyXY(r.x, r.y + r.height),
+    });
+}
+
+fn addPathFill(arena: std.mem.Allocator, raster: *coverage_raster.Rasterizer, path: tvg.Path, xf: Transform) !void {
+    for (path.segments) |segment| {
+        var points: std.ArrayList(Point) = .empty;
+        try flattenSegment(segment, xf, &points, arena);
+        stripTrailingDuplicatesOfFirst(&points);
+        collapseRunDuplicates(&points);
+        try raster.addContour(arena, points.items);
+    }
+}
+
+fn addPathStroke(arena: std.mem.Allocator, raster: *coverage_raster.Rasterizer, path: tvg.Path, half: f32, xf: Transform) !void {
+    for (path.segments) |segment| {
+        var points: std.ArrayList(Point) = .empty;
+        try flattenSegment(segment, xf, &points, arena);
+        if (points.items.len == 0) continue;
+        const closed = points.items.len > 1 and approxEqPoint(points.items[0], points.items[points.items.len - 1]);
+        if (closed) stripTrailingDuplicatesOfFirst(&points);
+        collapseRunDuplicates(&points);
+        try addStroke(arena, raster, points.items, closed, half);
+    }
+}
+
+fn addPolylineStroke(arena: std.mem.Allocator, raster: *coverage_raster.Rasterizer, vertices: []const tvg.Point, closed: bool, half: f32, xf: Transform) !void {
+    var points: std.ArrayList(Point) = .empty;
+    for (vertices) |vertex| try points.append(arena, xf.apply(vertex));
+    collapseRunDuplicates(&points);
+    try addStroke(arena, raster, points.items, closed, half);
+}
+
+/// Add a polyline stroked `half` either side with round joins and caps, as
+/// the shapes it is the union of: a band along every segment and a disc on
+/// every point. All run the same way round, so under the nonzero rule their
+/// overlaps are covered once.
+fn addStroke(arena: std.mem.Allocator, raster: *coverage_raster.Rasterizer, points: []const Point, closed: bool, half: f32) !void {
+    if (points.len == 0 or !(half > 0)) return;
+    const segments = if (closed and points.len > 2) points.len else points.len - 1;
+    for (0..segments) |index| {
+        const from = points[index];
+        const to = points[(index + 1) % points.len];
+        const along = to.diff(from);
+        const length = along.length();
+        if (length < 1e-6) continue;
+        // the left normal, `half` long
+        const side: Point = .{ .x = -along.y / length * half, .y = along.x / length * half };
+        try raster.addContour(arena, &.{ from.plus(side), to.plus(side), to.diff(side), from.diff(side) });
+    }
+
+    // a disc as round as the flattening: within 1/8 px on the icon
+    const tolerance = 0.125 * raster_oversample;
+    const step = math.acos(math.clamp(half / (half + tolerance), -1.0, 1.0));
+    const count: usize = math.clamp(@as(usize, @intFromFloat(@ceil(2 * math.pi / @max(step, 1e-3)))), 8, 256);
+    const disc = try arena.alloc(Point, count);
+    for (points) |centre| {
+        for (disc, 0..) |*point, index| {
+            // clockwise on screen, the way the bands run
+            const angle = -2 * math.pi * @as(f32, @floatFromInt(index)) / @as(f32, @floatFromInt(count));
+            point.* = .{ .x = centre.x + half * @cos(angle), .y = centre.y + half * @sin(angle) };
+        }
+        try raster.addContour(arena, disc);
+    }
 }
 
 pub fn appendTvg(
@@ -1025,6 +1364,7 @@ const math = std.math;
 const dvui = @import("dvui.zig");
 
 const svg2tvg = @import("svg2tvg");
+const coverage_raster = @import("coverage.zig");
 const tvg = svg2tvg.tvg;
 const parsing = tvg.parsing;
 
@@ -1040,4 +1380,101 @@ const ColorOrGradient = dvui.ColorOrGradient;
 
 test {
     std.testing.refAllDecls(@This());
+}
+
+/// A 24 x 24 TVG (the grid Lucide draws on) holding one stroked circle of
+/// radius 10 around (12, 12), 2 wide, drawn as two arcs: `circle` as an
+/// SVG-to-TVG conversion writes it. Written into `buffer`.
+fn testCircleTvg(buffer: []u8) ![]const u8 {
+    const Node = tvg.Path.Node;
+    var builder = tvg.builder.create(std.Io.Writer.fixed(buffer));
+    try builder.writeHeader(24, 24, .@"1/256", .u8888, .default);
+    try builder.writeColorTable(&.{try tvg.Color.fromString("ffffff")});
+    try builder.writeDrawPath(.{ .flat = 0 }, 2, &.{.{
+        .start = tvg.point(22, 12),
+        .commands = &.{
+            Node{ .arc_circle = .{ .data = .{ .radius = 10, .large_arc = false, .sweep = false, .target = tvg.point(2, 12) } } },
+            Node{ .arc_circle = .{ .data = .{ .radius = 10, .large_arc = false, .sweep = false, .target = tvg.point(22, 12) } } },
+            Node{ .close = .{ .data = {} } },
+        },
+    }});
+    try builder.writeEndOfFile();
+    return buffer[0..builder.writer.end];
+}
+
+/// Draw `tvg_bytes` with `renderIcon` into `rect` (physical pixels) inside a
+/// picture `size` physical pixels big, and answer each pixel's coverage
+/// (alpha, 0..1), row by row.
+fn testIconCoverage(gpa: std.mem.Allocator, tvg_bytes: []const u8, rect: Rect, size: dvui.Size.Physical) ![]f32 {
+    const area: Rect = .{ .x = 0, .y = 0, .w = size.w, .h = size.h };
+    var picture = dvui.Picture.start(area) orelse return error.SkipZigTest;
+    try dvui.renderIcon("test", tvg_bytes, .{ .r = rect, .s = 1.75 }, .{}, .{});
+    picture.stop();
+    const cw = dvui.currentWindow();
+    const pixels = try dvui.textureReadTarget(cw.lifo(), picture.texture);
+    defer cw.lifo().free(pixels);
+    const coverage = try gpa.alloc(f32, pixels.len);
+    for (pixels, coverage) |pixel, *out| out.* = @as(f32, @floatFromInt(pixel.a)) / 255.0;
+    picture.deinit();
+    return coverage;
+}
+
+/// The share of pixel (`column`, `row`) inside the ring of radius `radius`
+/// and half width `half` around `centre`, from 16 x 16 samples.
+fn testRingCoverage(centre: Point, radius: f32, half: f32, column: usize, row: usize) f32 {
+    var inside: f32 = 0;
+    for (0..16) |sample_y| {
+        for (0..16) |sample_x| {
+            const x = @as(f32, @floatFromInt(column)) + (@as(f32, @floatFromInt(sample_x)) + 0.5) / 16 - centre.x;
+            const y = @as(f32, @floatFromInt(row)) + (@as(f32, @floatFromInt(sample_y)) + 0.5) / 16 - centre.y;
+            if (@abs(@sqrt(x * x + y * y) - radius) <= half) inside += 1;
+        }
+    }
+    return inside / 256;
+}
+
+test "a stroked circle is one even ring: no beads where its pieces join" {
+    var t = try dvui.testing.init(.{ .window_size = .{ .w = 100, .h = 100 } });
+    defer t.deinit();
+
+    var buffer: [256]u8 = undefined;
+    const bytes = try testCircleTvg(&buffer);
+
+    // 16 logical pixels at 1.75: a 28 px icon, its ring 11.67 px round and
+    // 2.33 px wide, as Lucide's circle is in the editor.
+    const size: dvui.Size.Physical = .{ .w = 48, .h = 48 };
+    const width: usize = @intFromFloat(size.w);
+    const coverage = try testIconCoverage(std.testing.allocator, bytes, .{ .x = 10, .y = 10, .w = 28, .h = 28 }, size);
+    defer std.testing.allocator.free(coverage);
+
+    const centre: Point = .{ .x = 24, .y = 24 };
+    const radius: f32 = 10.0 * 28.0 / 24.0;
+    const half: f32 = 28.0 / 24.0;
+
+    // The ink in each of 72 sectors against the true ring's: beads (two
+    // anti-aliased edges laid over each other at every joint) or facets
+    // make some sectors heavier than others.
+    const sectors = 72;
+    var drawn: [sectors]f32 = @splat(0);
+    var ideal: [sectors]f32 = @splat(0);
+    var worst_pixel: f32 = 0;
+    for (coverage, 0..) |value, index| {
+        const column = index % width;
+        const row = index / width;
+        const expected = testRingCoverage(centre, radius, half, column, row);
+        worst_pixel = @max(worst_pixel, @abs(value - expected));
+        const angle = math.atan2(@as(f32, @floatFromInt(row)) + 0.5 - centre.y, @as(f32, @floatFromInt(column)) + 0.5 - centre.x);
+        const sector: usize = @min(sectors - 1, @as(usize, @intFromFloat((angle + math.pi) / (2 * math.pi) * sectors)));
+        drawn[sector] += value;
+        ideal[sector] += expected;
+    }
+    var lightest: f32 = math.floatMax(f32);
+    var heaviest: f32 = 0;
+    for (drawn, ideal) |ink, truth| {
+        lightest = @min(lightest, ink / truth);
+        heaviest = @max(heaviest, ink / truth);
+    }
+    errdefer std.debug.print("the ring's sectors carry {d} to {d} of their true ink; the worst pixel is {d} off\n", .{ lightest, heaviest, worst_pixel });
+    try std.testing.expect(heaviest - lightest <= 0.04);
+    try std.testing.expect(worst_pixel <= 0.06);
 }
