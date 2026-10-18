@@ -1255,7 +1255,7 @@ fn addTextEx(self: *TextLayoutWidget, text_in: []const u8, action: AddTextExActi
 
     // What a frame dump says this widget shows (`Debug.captureFrame`): every
     // run, in order, before any of it is sliced to the visible range below.
-    if (dvui.debug.capturing) dvui.debug.captureLabel(cw.gpa, self.data().id, text_in);
+    if (dvui.debug.capturing) dvui.debug.captureLabel(cw.gpa, self.data().id, text_in, self.data().options.override(opts).fontGet());
 
     // clip to content rect for all text
     _ = dvui.clip(self.data().contentRectScale().r);

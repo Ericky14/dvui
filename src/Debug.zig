@@ -99,6 +99,13 @@ pub const CapturedWidget = struct {
     /// accessibility label, so the first drawn run replaces the latter and
     /// every later run appends.
     label_drawn: bool = false,
+    /// Every distinct font size (`Font.size`, logical) the widget's drawn text
+    /// was set in, in the order first seen: a label's font, each run of a text
+    /// layout in its own. The first `text_size_count` are used; a fifth size is
+    /// dropped. What a type-scale check reads — `font` is only what the widget
+    /// resolved, which a box does whether or not it draws a letter.
+    text_size_buffer: [4]f32 = @splat(0),
+    text_size_count: u8 = 0,
     expand: Options.Expand,
     gravity: Options.Gravity,
     /// Subwindow (floating window / popup) this widget belongs to.
@@ -114,6 +121,18 @@ pub const CapturedWidget = struct {
     focused: bool,
     active: bool,
     visible: bool,
+
+    /// The font sizes the widget's drawn text was set in (`text_size_buffer`).
+    pub fn textSizes(self: *const CapturedWidget) []const f32 {
+        return self.text_size_buffer[0..self.text_size_count];
+    }
+
+    fn noteTextSize(self: *CapturedWidget, size: f32) void {
+        for (self.textSizes()) |seen| if (seen == size) return;
+        if (self.text_size_count == self.text_size_buffer.len) return;
+        self.text_size_buffer[self.text_size_count] = size;
+        self.text_size_count += 1;
+    }
 };
 
 /// Output shape for `dumpFrame`. `nested` rebuilds the parent/child tree (DOM
@@ -313,9 +332,11 @@ fn labelPrefix(text: []const u8) []const u8 {
 /// Record the text a widget shows, for `dumpFrame`'s `label`. Called by the
 /// widgets that draw text (`LabelWidget` once, `TextLayoutWidget` once per run)
 /// while `capturing`; a widget that adds several runs gets them joined in
-/// order, and the first run replaces an accessibility label. Best-effort like
-/// `captureWidget`: an allocation failure keeps what was already recorded.
-pub fn captureLabel(self: *Debug, gpa: std.mem.Allocator, id: dvui.Id, text: []const u8) void {
+/// order, and the first run replaces an accessibility label. `font` is the
+/// one the text is drawn in; its size joins the widget's `textSizes`.
+/// Best-effort like `captureWidget`: an allocation failure keeps what was
+/// already recorded.
+pub fn captureLabel(self: *Debug, gpa: std.mem.Allocator, id: dvui.Id, text: []const u8, font: dvui.Font) void {
     if (!self.capturing or text.len == 0) return;
     if (self.frames.items.len == 0) return;
     const frame = &self.frames.items[self.frames.items.len - 1];
@@ -328,6 +349,7 @@ pub fn captureLabel(self: *Debug, gpa: std.mem.Allocator, id: dvui.Id, text: []c
         if (candidate.id == id) break candidate;
     } else return;
 
+    widget.noteTextSize(font.size);
     const existing: []const u8 = if (widget.label_drawn) (widget.label orelse "") else "";
     widget.label_drawn = true;
     if (existing.len >= label_capture_max) return;
@@ -2028,6 +2050,52 @@ test "a captured widget carries its margin rect and the text it shows" {
     try std.testing.expect(kept.len <= label_capture_max);
     try std.testing.expect(kept.len > label_capture_max - 2);
     try std.testing.expect(std.unicode.utf8ValidateSlice(kept));
+}
+
+test "a captured widget records every font size its text is drawn in" {
+    // What a type-scale check reads: not the font a widget was GIVEN (a box
+    // resolves the theme's body font whether or not it draws a letter) but the
+    // sizes its letters were set in — a label's font, each run of a text
+    // layout in its own.
+    var t = try dvui.testing.init(.{});
+    defer t.deinit();
+
+    const Local = struct {
+        fn frame() !dvui.App.Result {
+            var box = dvui.box(@src(), .{}, .{ .expand = .both, .name = "outer" });
+            defer box.deinit();
+            dvui.labelNoFmt(@src(), "Position", .{}, .{ .name = "caption", .font = dvui.themeGet().font_body.withSize(13) });
+            var layout = dvui.textLayout(@src(), .{}, .{ .name = "prose", .font = dvui.themeGet().font_body.withSize(12) });
+            layout.addText("small ", .{});
+            layout.addText("big ", .{ .font = dvui.themeGet().font_body.withSize(15) });
+            layout.addText("small again", .{});
+            layout.deinit();
+            return .ok;
+        }
+    };
+
+    try dvui.testing.settle(Local.frame);
+    dvui.debug.captureFrame();
+    _ = try dvui.testing.step(Local.frame);
+    _ = try dvui.testing.step(Local.frame);
+    defer dvui.debug.clearCaptures(std.testing.allocator);
+
+    const capture = dvui.debug.lastCapture().?;
+    var seen: usize = 0;
+    for (capture.widgets.items) |*widget| {
+        const name = widget.name orelse continue;
+        if (std.mem.eql(u8, name, "outer")) {
+            seen += 1;
+            try std.testing.expectEqualSlices(f32, &.{}, widget.textSizes());
+        } else if (std.mem.eql(u8, name, "caption")) {
+            seen += 1;
+            try std.testing.expectEqualSlices(f32, &.{13}, widget.textSizes());
+        } else if (std.mem.eql(u8, name, "prose")) {
+            seen += 1;
+            try std.testing.expectEqualSlices(f32, &.{ 12, 15 }, widget.textSizes());
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 3), seen);
 }
 
 /// Frame counter for `diffFrame`, which renders slightly different content on
